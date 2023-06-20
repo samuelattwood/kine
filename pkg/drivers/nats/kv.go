@@ -3,11 +3,13 @@ package nats
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sirupsen/logrus"
 	"github.com/tidwall/btree"
@@ -60,6 +62,7 @@ type streamWatcher struct {
 	keyPrefix  string
 	ctx        context.Context
 	cancel     context.CancelFunc
+	errch      chan error
 }
 
 func (w *streamWatcher) Context() context.Context {
@@ -71,6 +74,10 @@ func (w *streamWatcher) Context() context.Context {
 
 func (w *streamWatcher) Updates() <-chan jetstream.KeyValueEntry {
 	return w.updates
+}
+
+func (w *streamWatcher) Err() <-chan error {
+	return w.errch
 }
 
 func (w *streamWatcher) Stop() error {
@@ -114,6 +121,7 @@ type KeyValue struct {
 	bt      *btree.Map[string, []*seqOp]
 	btm     sync.RWMutex
 	lastSeq uint64
+	cancel  context.CancelFunc
 }
 
 func (e *KeyValue) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
@@ -193,7 +201,13 @@ func (e *KeyValue) Delete(ctx context.Context, key string, opts ...jetstream.KVD
 	return e.nkv.Delete(ctx, ek, opts...)
 }
 
-func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (jetstream.KeyWatcher, error) {
+type KeyWatcher interface {
+	Updates() <-chan jetstream.KeyValueEntry
+	Stop() error
+	Err() <-chan error
+}
+
+func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyWatcher, error) {
 	// Everything but the last token will be treated as a filter
 	// on the watcher. The last token will used as a deliver-time filter.
 	filter := keys
@@ -270,12 +284,12 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (jets
 		return nil, err
 	}
 
+	errch := make(chan error, 1)
 	ci := con.CachedInfo()
 	cctx, err := con.Consume(handler,
 		jetstream.ConsumeErrHandler(func(cctx jetstream.ConsumeContext, err error) {
-			if !strings.Contains(err.Error(), "Server Shutdown") {
-				logrus.Warnf("error consuming from %s: %v", ci.Name, err)
-			}
+			errch <- err
+			logrus.Debugf("watch: error consuming from %s: %v", ci.Name, err)
 		}),
 	)
 	if err != nil {
@@ -291,6 +305,7 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (jets
 		updates:    updates,
 		ctx:        wctx,
 		cancel:     cancel,
+		errch:      errch,
 	}
 
 	return w, nil
@@ -320,13 +335,20 @@ func (e *KeyValue) btreeWatcher(ctx context.Context) error {
 	}
 	defer w.Stop()
 
-	status, _ := e.nkv.Status(ctx)
+	status, err := e.nkv.Status(ctx)
+	if err != nil {
+		return err
+	}
+
 	hsize := status.History()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+
+		case err := <-w.Err():
+			return err
 
 		case x := <-w.Updates():
 			if x == nil {
@@ -499,8 +521,11 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 	for _, m := range matches {
 		e, err := e.GetRevision(ctx, m.key, m.seq)
 		if err != nil {
-			logrus.Errorf("get revision in list error: %s @ %d: %v", m.key, m.seq, err)
-			continue
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
+				continue
+			}
+			logrus.Debugf("get revision in list error: %s @ %d: %v", m.key, m.seq, err)
+			return nil, err
 		}
 		entries = append(entries, e)
 	}
@@ -508,23 +533,35 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 	return entries, nil
 }
 
+func (e *KeyValue) Stop() {
+	e.cancel()
+}
+
 func NewKeyValue(ctx context.Context, bucket jetstream.KeyValue, js jetstream.JetStream) *KeyValue {
+	ctx, cancel := context.WithCancel(ctx)
+
 	kv := &KeyValue{
-		nkv: bucket,
-		js:  js,
-		kc:  &keyCodec{},
-		vc:  &valueCodec{},
-		bt:  btree.NewMap[string, []*seqOp](0),
+		nkv:    bucket,
+		js:     js,
+		kc:     &keyCodec{},
+		vc:     &valueCodec{},
+		bt:     btree.NewMap[string, []*seqOp](0),
+		cancel: cancel,
 	}
 
 	go func() {
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
 		for {
 			err := kv.btreeWatcher(ctx)
-			if err != nil {
-				logrus.Errorf("btree watcher error: %v", err)
+			if errors.Is(err, context.Canceled) || errors.Is(err, nats.ErrConnectionClosed) {
+				return
 			}
+			if err == nil ||
+				errors.Is(err, jetstream.ErrConsumerDeleted) ||
+				errors.Is(err, jetstream.ErrStreamNotFound) {
+				continue
+			}
+
+			logrus.Warnf("btree watcher error: %v", err)
 		}
 	}()
 
