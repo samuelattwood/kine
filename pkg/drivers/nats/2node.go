@@ -252,6 +252,11 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 	// Keep track of the last sequence number that was published.
 	seq := uint64(0)
 	str, err := m.ljs.Stream(ctx, sname)
+	if err != nil {
+		done <- fmt.Errorf("failed to get local stream: %w", err)
+		return
+	}
+
 	msgHandler := func(msg jetstream.Msg) {
 		md, _ := msg.Metadata()
 
