@@ -83,19 +83,19 @@ func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (je
 			m.lkkv.Stop()
 		}
 
-		m.Logger.Infof("re-creating bucket %s with sequence %d", m.KVConfig.Bucket, seq)
+		m.Logger.Infof("init-local: re-creating bucket %s with sequence %d", m.KVConfig.Bucket, seq)
 		err := m.ljs.DeleteKeyValue(ctx, m.KVConfig.Bucket)
 		if err != nil {
-			m.Logger.Errorf("failed to delete bucket %s: %s", m.KVConfig.Bucket, err)
+			m.Logger.Errorf("init-local: failed to delete bucket %s: %s", m.KVConfig.Bucket, err)
 		}
 	} else {
-		m.Logger.Infof("checking if bucket %s exists", m.KVConfig.Bucket)
+		m.Logger.Infof("into-local: checking if bucket %s exists", m.KVConfig.Bucket)
 		_, err := m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
 		if err == nil {
 			m.lkv, _ = m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
 			return m.ljs.Stream(ctx, fmt.Sprintf("KV_%s", m.KVConfig.Bucket))
 		}
-		m.Logger.Infof("creating bucket %s", m.KVConfig.Bucket)
+		m.Logger.Infof("info-local: creating bucket %s", m.KVConfig.Bucket)
 	}
 
 	// TODO: update to nats.go 1.33.1 which has the "first revision" option.
@@ -289,12 +289,12 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 				subject := fmt.Sprintf("$KV.%s.__tomb", m.KVConfig.Bucket)
 				pa, err := m.ljs.Publish(ctx, subject, nil)
 				if err != nil {
-					m.Logger.Warnf("failed to publish tombstone: %s", err)
+					m.Logger.Debugf("failed to publish tombstone: %s", err)
 					continue
 				}
 				err = str.DeleteMsg(ctx, pa.Sequence)
 				if err != nil {
-					m.Logger.Warnf("failed to delete tombstone @ %d: %s", i, err)
+					m.Logger.Debugf("failed to delete tombstone @ %d: %s", i, err)
 				}
 			}
 		}
@@ -321,7 +321,7 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 
 		seq = pa.Sequence
 		if pa.Sequence != md.Sequence.Stream {
-			m.Logger.Warnf("sequence mismatch: %d -> %d", md.Sequence.Stream, pa.Sequence)
+			m.Logger.Debugf("sequence mismatch: %d -> %d", md.Sequence.Stream, pa.Sequence)
 		}
 
 		numRemaining--
@@ -422,7 +422,7 @@ func (m *Manager) Init(ctx context.Context) error {
 				m.Logger.Warnf("init: failed to get remote leadership state: %s", err)
 			}
 		} else {
-			m.Logger.Warnf("init-peer: failed to connect to peer")
+			m.Logger.Warnf("init: failed to connect to peer")
 		}
 
 		// On startup, if we are the configured leader and the remote is not, then

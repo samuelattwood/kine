@@ -196,7 +196,7 @@ func (b *Backend) Create(ctx context.Context, key string, value []byte, lease in
 		seq, err := b.kv(true).Update(ctx, key, data, uint64(rev))
 		if err != nil {
 			if jsWrongLastSeqErr.Is(err) {
-				b.l.Warnf("create conflict: key=%s, rev=%d, err=%s", key, rev, err)
+				b.l.Debugf("create conflict: key=%s, rev=%d, err=%s", key, rev, err)
 				return 0, server.ErrKeyExists
 			}
 			return 0, err
@@ -209,7 +209,7 @@ func (b *Backend) Create(ctx context.Context, key string, value []byte, lease in
 	seq, err := b.kv(true).Create(ctx, key, data)
 	if err != nil {
 		if jsWrongLastSeqErr.Is(err) {
-			b.l.Warnf("create conflict: key=%s, rev=0, err=%s", key, err)
+			b.l.Debugf("create conflict: key=%s, rev=0, err=%s", key, err)
 			return 0, server.ErrKeyExists
 		}
 		return 0, err
@@ -251,7 +251,7 @@ func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64
 	drev, err := b.kv(true).Update(ctx, key, data, uint64(rev))
 	if err != nil {
 		if jsWrongLastSeqErr.Is(err) {
-			b.l.Warnf("delete conflict: key=%s, rev=%d, err=%s", key, rev, err)
+			b.l.Debugf("delete conflict: key=%s, rev=%d, err=%s", key, rev, err)
 			return 0, nil, false, nil
 		}
 		return rev, value.KV, false, nil
@@ -260,7 +260,7 @@ func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64
 	err = b.kv(true).Delete(ctx, key, jetstream.LastRevision(drev))
 	if err != nil {
 		if jsWrongLastSeqErr.Is(err) {
-			b.l.Warnf("delete conflict: key=%s, rev=%d, err=%s", key, drev, err)
+			b.l.Debugf("delete conflict: key=%s, rev=%d, err=%s", key, drev, err)
 			return 0, nil, false, nil
 		}
 		return rev, value.KV, false, nil
@@ -315,7 +315,7 @@ func (b *Backend) Update(ctx context.Context, key string, value []byte, revision
 	if err != nil {
 		// This may occur if a concurrent writer created the key.
 		if jsWrongLastSeqErr.Is(err) {
-			b.l.Warnf("update conflict: key=%s, rev=%d, err=%s", key, revision, err)
+			b.l.Debugf("update conflict: key=%s, rev=%d, err=%s", key, revision, err)
 			return 0, nil, false, nil
 		}
 		return 0, nil, false, err
