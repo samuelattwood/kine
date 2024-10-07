@@ -94,10 +94,12 @@ func (b *Backend) get(ctx context.Context, key string, revision int64, allowDele
 	}
 
 	if b.isExpiredKey(&val) {
-		err := b.kv(true).Delete(ctx, val.KV.Key, jetstream.LastRevision(uint64(rev)))
-		if err != nil {
-			b.l.Warnf("Failed to delete expired key %s: %v", val.KV.Key, err)
-		}
+		/*
+			err := b.kv(true).Delete(ctx, val.KV.Key, jetstream.LastRevision(uint64(rev)))
+			if err != nil {
+				b.l.Warnf("Failed to delete expired key %s: %v", val.KV.Key, err)
+			}
+		*/
 		// Return a zero indicating the key was deleted.
 		return 0, nil, jetstream.ErrKeyNotFound
 	}
