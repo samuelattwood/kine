@@ -330,7 +330,7 @@ func (e *KeyValue) btreeWatcher(ctx context.Context) error {
 	logrus.Debugf("btree watcher: starting at %d", e.lastSeq)
 	w, err := e.Watch(ctx, "/", int64(e.lastSeq))
 	if err != nil {
-		return fmt.Errorf("init: %s", err)
+		panic(fmt.Errorf("init: %s", err))
 	}
 	defer w.Stop()
 
