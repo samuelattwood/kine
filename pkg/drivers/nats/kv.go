@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sirupsen/logrus"
 	"github.com/tidwall/btree"
@@ -329,6 +328,7 @@ func (e *KeyValue) BucketRevision() int64 {
 }
 
 func (e *KeyValue) btreeWatcher(ctx context.Context) error {
+	logrus.Debugf("kv: btree watcher starting at %d", e.lastSeq)
 	w, err := e.Watch(ctx, "/", int64(e.lastSeq))
 	if err != nil {
 		return err
@@ -552,16 +552,8 @@ func NewKeyValue(ctx context.Context, bucket jetstream.KeyValue, js jetstream.Je
 	go func() {
 		for {
 			err := kv.btreeWatcher(ctx)
-			if errors.Is(err, context.Canceled) || errors.Is(err, nats.ErrConnectionClosed) {
-				return
-			}
-			if err == nil ||
-				errors.Is(err, jetstream.ErrConsumerDeleted) ||
-				errors.Is(err, jetstream.ErrStreamNotFound) {
-				continue
-			}
-
-			logrus.Warnf("btree watcher error: %v", err)
+			logrus.Debugf("btree watcher error: %v", err)
+			jitterSleep(time.Second)
 		}
 	}()
 
