@@ -331,13 +331,13 @@ func (e *KeyValue) btreeWatcher(ctx context.Context) error {
 	logrus.Debugf("kv: btree watcher starting at %d", e.lastSeq)
 	w, err := e.Watch(ctx, "/", int64(e.lastSeq))
 	if err != nil {
-		return err
+		return fmt.Errorf("init: %s", err)
 	}
 	defer w.Stop()
 
 	status, err := e.nkv.Status(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("status: %s", err)
 	}
 
 	hsize := status.History()
@@ -345,10 +345,10 @@ func (e *KeyValue) btreeWatcher(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("context: %s", ctx.Err())
 
 		case err := <-w.Err():
-			return err
+			return fmt.Errorf("error: %s", err)
 
 		case x := <-w.Updates():
 			if x == nil {
@@ -552,7 +552,7 @@ func NewKeyValue(ctx context.Context, bucket jetstream.KeyValue, js jetstream.Je
 	go func() {
 		for {
 			err := kv.btreeWatcher(ctx)
-			logrus.Debugf("btree watcher error: %v", err)
+			logrus.Debugf("btree watcher: %v", err)
 			jitterSleep(time.Second)
 		}
 	}()
