@@ -198,7 +198,7 @@ func (m *Manager) initPeer(ctx context.Context) {
 		}
 	}
 
-	pjs, _ := jetstream.New(m.pnc)
+	pjs, _ := jetstream.New(pnc)
 
 	var pkv jetstream.KeyValue
 	i := 0
