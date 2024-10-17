@@ -277,23 +277,22 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyW
 	}
 	cfg.DeliverPolicy = dp
 
-	con, err := e.js.OrderedConsumer(ctx, fmt.Sprintf("KV_%s", e.nkv.Bucket()), cfg)
+	con, err := e.js.OrderedConsumer(wctx, fmt.Sprintf("KV_%s", e.nkv.Bucket()), cfg)
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, fmt.Errorf("creating ordered consumer: %s", err)
 	}
 
 	errch := make(chan error, 1)
 	ci := con.CachedInfo()
 	cctx, err := con.Consume(handler,
 		jetstream.ConsumeErrHandler(func(cctx jetstream.ConsumeContext, err error) {
-			errch <- err
-			logrus.Debugf("watch: error consuming from %s: %v", ci.Name, err)
+			errch <- fmt.Errorf("watch: error consuming from %s: %v", ci.Name, err)
 		}),
 	)
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, fmt.Errorf("starting consuming: %s", err)
 	}
 
 	w := &streamWatcher{
@@ -328,7 +327,7 @@ func (e *KeyValue) BucketRevision() int64 {
 }
 
 func (e *KeyValue) btreeWatcher(ctx context.Context) error {
-	logrus.Debugf("kv: btree watcher starting at %d", e.lastSeq)
+	logrus.Debugf("btree watcher: starting at %d", e.lastSeq)
 	w, err := e.Watch(ctx, "/", int64(e.lastSeq))
 	if err != nil {
 		return fmt.Errorf("init: %s", err)
