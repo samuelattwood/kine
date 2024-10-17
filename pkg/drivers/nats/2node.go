@@ -283,7 +283,7 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 		// sequence is 15, then we need to publish tombstones for 11-14.
 		if md.Sequence.Stream != seq+1 {
 			m.Logger.Debugf("gap detected: %d -> %d", seq, md.Sequence.Stream)
-			num := int(md.Sequence.Stream - seq)
+			num := int(md.Sequence.Stream-seq) - 1
 
 			for i := 0; i < num; i++ {
 				subject := fmt.Sprintf("$KV.%s.__tomb", m.KVConfig.Bucket)
