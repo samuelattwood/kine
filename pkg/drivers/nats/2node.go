@@ -172,43 +172,53 @@ func (m *Manager) initLocal(ctx context.Context) error {
 
 // initPeer initializes the peer connection and ensures the key-value bucket exists.
 func (m *Manager) initPeer(ctx context.Context) {
+	// Get a local copy to check.
+	m.mu.RLock()
+	pnc := m.pnc
+	m.mu.RUnlock()
+
 	opts := append([]nats.Option{}, m.PeerOpts...)
 	opts = append(opts,
 		nats.MaxReconnects(-1),
 		nats.Name("kine-peer"),
 	)
 
-	if m.pnc == nil {
+	var err error
+	if pnc == nil {
 		i := 0
 		for {
-			pnc, err := nats.Connect(m.PeerURL, opts...)
+			pnc, err = nats.Connect(m.PeerURL, opts...)
 			if err != nil {
 				i++
 				m.Logger.Warnf("init-peer: failed to connect: attempt %d: %s", i, err)
 				jitterSleep(time.Second)
 				continue
 			}
-			m.pnc = pnc
 			break
 		}
 	}
 
-	m.pjs, _ = jetstream.New(m.pnc)
+	pjs, _ := jetstream.New(m.pnc)
 
+	var pkv jetstream.KeyValue
 	i := 0
 	for {
-		pkv, err := m.pjs.KeyValue(ctx, m.KVConfig.Bucket)
+		pkv, err = pjs.KeyValue(ctx, m.KVConfig.Bucket)
 		if err != nil {
 			i++
 			m.Logger.Warnf("init-peer: failed to get KV: attempt %d: %s", i, err)
 			jitterSleep(time.Second)
 			continue
 		}
-		m.pkv = pkv
 		break
 	}
 
-	m.pkkv = NewKeyValue(ctx, m.pkv, m.pjs)
+	m.mu.Lock()
+	m.pnc = pnc
+	m.pjs = pjs
+	m.pkkv = NewKeyValue(ctx, pkv, pjs)
+	m.mu.Unlock()
+
 	m.Logger.Infof("init-peer: connected to peer: %s", m.PeerURL)
 }
 
@@ -543,9 +553,11 @@ func (m *Manager) Stop() {
 	if m.lnc != nil {
 		m.lnc.Drain()
 	}
+	m.mu.RLock()
 	if m.pnc != nil {
 		m.pnc.Drain()
 	}
+	m.mu.RUnlock()
 }
 
 func (m *Manager) KeyValue(write bool) *KeyValue {
