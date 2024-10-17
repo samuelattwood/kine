@@ -343,7 +343,6 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 
 	m.cctx = cctx
 	m.Logger.Infof("started stream replication")
-	done <- nil
 }
 
 func (m *Manager) Init(ctx context.Context) error {
