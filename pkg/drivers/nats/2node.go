@@ -411,37 +411,33 @@ func (m *Manager) Init(ctx context.Context) error {
 
 	for {
 		// Attempt to get the remote state to decide if we should assume leadership.
-		var remoteState *keys.LeadershipKVState
+		var peerState keys.LeadershipKVState
 		if m.pnc != nil {
-			rs, err := tne.GetRemoteLeadershipState(m.pnc)
+			peerState, err = tne.GetRemoteLeadershipState(m.pnc)
 			if err == nil {
-				remoteState = &rs
-				m.Logger.Infof("init: remote leadership state: %v", rs.State)
+				m.Logger.Infof("init: peer leadership state: %v", peerState.State)
 			} else {
-				m.Logger.Warnf("init: failed to get remote leadership state: %s", err)
+				m.Logger.Warnf("init: failed to get peer leadership state: %s", err)
 			}
 		} else {
 			m.Logger.Warnf("init: failed to connect to peer")
 		}
 
-		// On startup, if we are the configured leader and the remote is not, then
-		// assume leadership.
-		if isConfiguredLeader {
-			if remoteState == nil {
-				m.isLeader = true
-				m.Logger.Infof("init: assuming leadership, remote state is unknown")
-				break
-			} else if remoteState.State != keys.Leader && remoteState.State != keys.LeaderRX {
-				m.isLeader = true
-				m.Logger.Infof("init: assuming leadership, configured leader without peer leader state")
-				break
-			}
-		} else if remoteState == nil || remoteState.State != keys.Leader {
-			m.Logger.Debugf("init: configured leader is still initializing, waiting...")
-			jitterSleep(50 * time.Millisecond)
-		} else {
+		// If the peer is a leader or leaderRX, continue.
+		if peerState.State == keys.Leader || peerState.State == keys.LeaderRX {
+			m.Logger.Infof("init: peer is leader")
 			break
 		}
+
+		// Peer is not the leader, so assume leadership if we are the configured leader.
+		if isConfiguredLeader {
+			m.isLeader = true
+			m.Logger.Infof("init: assuming leadership, configured leader without peer leader state")
+			break
+		}
+
+		m.Logger.Debugf("init: configured leader is still initializing, waiting...")
+		jitterSleep(time.Second)
 	}
 
 	go func() {
