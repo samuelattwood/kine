@@ -415,22 +415,14 @@ func (m *Manager) Init(ctx context.Context) error {
 			jitterSleep(time.Second)
 			continue
 		}
-		m.pnc = pnc
-		break
-	}
 
-	for {
 		// Attempt to get the remote state to decide if we should assume leadership.
-		var peerState keys.LeadershipKVState
-		if m.pnc != nil {
-			peerState, err = tne.GetRemoteLeadershipState(m.pnc)
-			if err == nil {
-				m.Logger.Infof("init: peer leadership state: %v", peerState.State)
-			} else {
-				m.Logger.Warnf("init: failed to get peer leadership state: %s", err)
-			}
+		peerState, err := tne.GetRemoteLeadershipState(pnc)
+		if err == nil {
+			m.Logger.Infof("init: peer leadership state: %v", peerState.State)
 		} else {
-			m.Logger.Warnf("init: failed to connect to peer")
+			m.Logger.Warnf("init: failed to get peer leadership state: %s", err)
+			continue
 		}
 
 		// If the peer is a leader or leaderRX, continue.
@@ -445,9 +437,6 @@ func (m *Manager) Init(ctx context.Context) error {
 			m.Logger.Infof("init: assuming leadership, configured leader without peer leader state")
 			break
 		}
-
-		m.Logger.Debugf("init: configured leader is still initializing, waiting...")
-		jitterSleep(time.Second)
 	}
 
 	go func() {
@@ -507,7 +496,7 @@ func (m *Manager) Init(ctx context.Context) error {
 	}()
 
 	// Attempt to initialize the peer in the background if we are the leader.
-	// Otherwise, initialize the peer and start stream replication.
+	// Otherwise, initialize the peer in the foreground and start stream replication.
 	if m.isLeader {
 		m.Logger.Infof("init: starting as leader")
 		go m.initPeer(cctx)
