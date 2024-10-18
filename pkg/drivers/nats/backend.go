@@ -90,7 +90,7 @@ func (b *Backend) get(ctx context.Context, key string, revision int64, allowDele
 	}
 
 	if val.Delete && !allowDeletes {
-		return 0, nil, jetstream.ErrKeyNotFound
+		return rev, nil, jetstream.ErrKeyNotFound
 	}
 
 	if b.isExpiredKey(&val) {
@@ -101,7 +101,7 @@ func (b *Backend) get(ctx context.Context, key string, revision int64, allowDele
 			}
 		*/
 		// Return a zero indicating the key was deleted.
-		return 0, nil, jetstream.ErrKeyNotFound
+		return rev, nil, jetstream.ErrKeyNotFound
 	}
 
 	return rev, &val, nil
