@@ -124,7 +124,7 @@ func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (je
 				return nil, fmt.Errorf("init-local: failed to get KV: %w", err)
 			}
 
-			m.lkkv = NewKeyValue(ctx, m.lkv, m.ljs)
+			m.lkkv = NewKeyValue(ctx, "local", m.lkv, m.ljs)
 			return str, nil
 		}
 
@@ -222,7 +222,7 @@ func (m *Manager) initPeer(ctx context.Context) {
 	m.mu.Lock()
 	m.pnc = pnc
 	m.pjs = pjs
-	m.pkkv = NewKeyValue(ctx, pkv, pjs)
+	m.pkkv = NewKeyValue(ctx, "peer", pkv, pjs)
 	m.mu.Unlock()
 
 	m.Logger.Infof("init-peer: connected to peer: %s", m.PeerURL)
@@ -413,9 +413,10 @@ func (m *Manager) Init(ctx context.Context) error {
 	// Best effort to initialize a temporary peer connection
 	// to check the leadership state of the peer.
 	attempts := 0
+	var pnc *nats.Conn
 	for attempts < 3 {
 		attempts++
-		pnc, err := nats.Connect(m.PeerURL, m.PeerOpts...)
+		pnc, err = nats.Connect(m.PeerURL, m.PeerOpts...)
 		if err != nil {
 			m.Logger.Warnf("init-peer: failed to connect: attempt %d: %s", attempts, err)
 			jitterSleep(time.Second)
@@ -443,6 +444,9 @@ func (m *Manager) Init(ctx context.Context) error {
 			m.Logger.Infof("init: assuming leadership, configured leader without peer leader state")
 			break
 		}
+	}
+	if pnc != nil {
+		pnc.Close()
 	}
 
 	go func() {
@@ -559,14 +563,19 @@ func (m *Manager) KeyValue(write bool) *KeyValue {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	var kv *KeyValue
+
 	// Leader always points to local.
-	if m.isLeader {
-		return m.lkkv
+	// Writes point to leader otherwise local replica for reads.
+	if m.isLeader || !write {
+		kv = m.lkkv
+	} else {
+		kv = m.pkkv
 	}
 
-	// Writes point to leader otherwise local replica for reads.
-	if write {
-		return m.pkkv
+	if kv == nil {
+		panic(fmt.Sprintf("key-value is nil: isLeader=%v, write=%v", m.isLeader, write))
 	}
-	return m.lkkv
+
+	return kv
 }

@@ -221,7 +221,7 @@ func newBackend(ctx context.Context, connection string, tlsInfo tls.Config, lega
 
 		logrus.Infof("bucket initialized: %s", config.bucket)
 
-		kv := NewKeyValue(ctx, bucket, js)
+		kv := NewKeyValue(ctx, "local", bucket, js)
 		ekv = func(bool) *KeyValue {
 			return kv
 		}

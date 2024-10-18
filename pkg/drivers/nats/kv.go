@@ -110,6 +110,7 @@ func (e *kvEntry) Delta() uint64                   { return e.delta }
 func (e *kvEntry) Operation() jetstream.KeyValueOp { return e.operation }
 
 type KeyValue struct {
+	name    string
 	nkv     jetstream.KeyValue
 	js      jetstream.JetStream
 	kc      *keyCodec
@@ -319,7 +320,7 @@ func (e *KeyValue) BucketRevision() int64 {
 }
 
 func (e *KeyValue) btreeWatcher(ctx context.Context) error {
-	logrus.Debugf("btree watcher: starting at %d", e.lastSeq)
+	logrus.Debugf("%s: btree watcher: starting at %d", e.name, e.lastSeq)
 	w, err := e.Watch(ctx, "/", int64(e.lastSeq))
 	if err != nil {
 		return fmt.Errorf("init: %s", err)
@@ -506,19 +507,17 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 	}
 	e.btm.RUnlock()
 
-	logrus.Debugf("kv: list: got %d matches from btree", len(matches))
-
 	var entries []jetstream.KeyValueEntry
 	for _, m := range matches {
-		e, err := e.GetRevision(ctx, m.key, m.seq)
+		r, err := e.GetRevision(ctx, m.key, m.seq)
 		if err != nil {
 			if errors.Is(err, jetstream.ErrKeyNotFound) {
 				continue
 			}
-			logrus.Debugf("get revision in list error: %s @ %d: %v", m.key, m.seq, err)
+			logrus.Debugf("%s: get revision in list error: %s @ %d: %v", e.name, m.key, m.seq, err)
 			return nil, err
 		}
-		entries = append(entries, e)
+		entries = append(entries, r)
 	}
 
 	return entries, nil
@@ -528,10 +527,11 @@ func (e *KeyValue) Stop() {
 	e.cancel()
 }
 
-func NewKeyValue(ctx context.Context, bucket jetstream.KeyValue, js jetstream.JetStream) *KeyValue {
+func NewKeyValue(ctx context.Context, name string, bucket jetstream.KeyValue, js jetstream.JetStream) *KeyValue {
 	ctx, cancel := context.WithCancel(ctx)
 
 	kv := &KeyValue{
+		name:   name,
 		nkv:    bucket,
 		js:     js,
 		kc:     &keyCodec{},
@@ -543,7 +543,7 @@ func NewKeyValue(ctx context.Context, bucket jetstream.KeyValue, js jetstream.Je
 	go func() {
 		for {
 			err := kv.btreeWatcher(ctx)
-			logrus.Debugf("btree watcher: %v", err)
+			logrus.Debugf("%s: btree watcher: %v", name, err)
 			jitterSleep(time.Second)
 		}
 	}()

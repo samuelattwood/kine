@@ -35,7 +35,7 @@ func setupBackend(t *testing.T) (*server.Server, *nats.Conn, *Backend) {
 	})
 	noErr(t, err)
 
-	ekv := NewKeyValue(ctx, bkt, js)
+	ekv := NewKeyValue(ctx, "local", bkt, js)
 
 	l := logrus.New()
 	l.SetOutput(io.Discard)
