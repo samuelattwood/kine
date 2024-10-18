@@ -146,6 +146,18 @@ func (m *Manager) initLocal(ctx context.Context) error {
 	opts = append(opts,
 		nats.MaxReconnects(-1),
 		nats.Name("kine-local"),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			logrus.Errorf("kine-local: nats disconnected: %s", err)
+		}),
+		nats.DiscoveredServersHandler(func(nc *nats.Conn) {
+			logrus.Infof("kine-local: nats discovered servers: %v", nc.Servers())
+		}),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+			logrus.Errorf("kine-local: nats error callback: %s", err)
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			logrus.Infof("kine-local: nats reconnected: %v", nc.ConnectedUrl())
+		}),
 	)
 	// Local connection should always succeed.
 	nc, err := nats.Connect(m.LocalURL, opts...)
@@ -176,6 +188,18 @@ func (m *Manager) initPeer(ctx context.Context) {
 	opts = append(opts,
 		nats.MaxReconnects(-1),
 		nats.Name("kine-peer"),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			logrus.Errorf("kine-peer: nats disconnected: %s", err)
+		}),
+		nats.DiscoveredServersHandler(func(nc *nats.Conn) {
+			logrus.Infof("kine-peer: nats discovered servers: %v", nc.Servers())
+		}),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+			logrus.Errorf("kine-peer: nats error callback: %s", err)
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			logrus.Infof("kine-peer: nats reconnected: %v", nc.ConnectedUrl())
+		}),
 	)
 
 	var err error
@@ -410,43 +434,43 @@ func (m *Manager) Init(ctx context.Context) error {
 	}
 	m.Logger.Infof("is configured leader: %v", isConfiguredLeader)
 
-	// Best effort to initialize a temporary peer connection
-	// to check the leadership state of the peer.
-	attempts := 0
-	var pnc *nats.Conn
-	for attempts < 3 {
-		attempts++
-		pnc, err = nats.Connect(m.PeerURL, m.PeerOpts...)
-		if err != nil {
-			m.Logger.Warnf("init-peer: failed to connect: attempt %d: %s", attempts, err)
-			jitterSleep(time.Second)
-			continue
-		}
+	// If this node is the configured leader, attempt to connect to the peer
+	// to determine if the peer is the leader. If the peer is not the leader,
+	// assume leadership.
+	if isConfiguredLeader {
+		var pnc *nats.Conn
 
-		// Attempt to get the remote state to decide if we should assume leadership.
-		peerState, err := tne.GetRemoteLeadershipState(pnc)
-		if err == nil {
-			m.Logger.Infof("init: peer leadership state: %v", peerState.State)
-		} else {
-			m.Logger.Warnf("init: failed to get peer leadership state: %s", err)
-			continue
-		}
+		for i := 0; i < 3; i++ {
+			pnc, err = nats.Connect(m.PeerURL, m.PeerOpts...)
+			if err != nil {
+				m.Logger.Warnf("init-peer: failed to connect: attempt %d: %s", i+1, err)
+				jitterSleep(time.Second)
+				continue
+			}
 
-		// If the peer is a leader or leaderRX, continue.
-		if peerState.State == keys.Leader || peerState.State == keys.LeaderRX {
-			m.Logger.Infof("init: peer is leader")
-			break
-		}
+			// Attempt to get the remote state to decide if we should assume leadership.
+			peerState, err := tne.GetRemoteLeadershipState(pnc)
+			if err == nil {
+				m.Logger.Infof("init: peer leadership state: %v", peerState.State)
+			} else {
+				m.Logger.Warnf("init: failed to get peer leadership state: %s", err)
+				continue
+			}
 
-		// Peer is not the leader, so assume leadership if we are the configured leader.
-		if isConfiguredLeader {
+			// If the peer is a leader or leaderRX, continue.
+			if peerState.State == keys.Leader || peerState.State == keys.LeaderRX {
+				m.Logger.Infof("init: peer is leader")
+				break
+			}
+
+			// Peer is not the leader, so assume leadership if we are the configured leader.
 			m.isLeader = true
 			m.Logger.Infof("init: assuming leadership, configured leader without peer leader state")
 			break
 		}
-	}
-	if pnc != nil {
-		pnc.Close()
+		if pnc != nil {
+			pnc.Close()
+		}
 	}
 
 	go func() {
