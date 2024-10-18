@@ -80,9 +80,6 @@ func (w *streamWatcher) Err() <-chan error {
 }
 
 func (w *streamWatcher) Stop() error {
-	if w.cancel != nil {
-		w.cancel()
-	}
 	if w.cctx != nil {
 		w.cctx.Stop()
 	}
@@ -225,8 +222,6 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyW
 		filter = fmt.Sprintf("$KV.%s.%s", e.nkv.Bucket(), p)
 	}
 
-	wctx, cancel := context.WithCancel(ctx)
-
 	updates := make(chan jetstream.KeyValueEntry, 100)
 	subjectPrefix := fmt.Sprintf("$KV.%s.", e.nkv.Bucket())
 
@@ -277,9 +272,8 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyW
 	}
 	cfg.DeliverPolicy = dp
 
-	con, err := e.js.OrderedConsumer(wctx, fmt.Sprintf("KV_%s", e.nkv.Bucket()), cfg)
+	con, err := e.js.OrderedConsumer(ctx, fmt.Sprintf("KV_%s", e.nkv.Bucket()), cfg)
 	if err != nil {
-		cancel()
 		return nil, fmt.Errorf("creating ordered consumer: %s", err)
 	}
 
@@ -291,7 +285,6 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyW
 		}),
 	)
 	if err != nil {
-		cancel()
 		return nil, fmt.Errorf("starting consuming: %s", err)
 	}
 
@@ -301,8 +294,7 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyW
 		keyCodec:   e.kc,
 		valueCodec: e.vc,
 		updates:    updates,
-		ctx:        wctx,
-		cancel:     cancel,
+		ctx:        ctx,
 		errch:      errch,
 	}
 
@@ -330,7 +322,7 @@ func (e *KeyValue) btreeWatcher(ctx context.Context) error {
 	logrus.Debugf("btree watcher: starting at %d", e.lastSeq)
 	w, err := e.Watch(ctx, "/", int64(e.lastSeq))
 	if err != nil {
-		panic(fmt.Errorf("init: %s", err))
+		return fmt.Errorf("init: %s", err)
 	}
 	defer w.Stop()
 
