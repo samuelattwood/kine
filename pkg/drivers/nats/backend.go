@@ -89,20 +89,20 @@ func (b *Backend) get(ctx context.Context, key string, revision int64, allowDele
 		return 0, nil, err
 	}
 
-	if val.Delete && !allowDeletes {
-		return rev, nil, jetstream.ErrKeyNotFound
+	if (val.Delete && !allowDeletes) || b.isExpiredKey(&val) {
+		err = jetstream.ErrKeyNotFound
 	}
 
-	if b.isExpiredKey(&val) {
-		/*
-			err := b.kv(true).Delete(ctx, val.KV.Key, jetstream.LastRevision(uint64(rev)))
-			if err != nil {
-				b.l.Warnf("Failed to delete expired key %s: %v", val.KV.Key, err)
-			}
-		*/
-		// Return a zero indicating the key was deleted.
-		return rev, nil, jetstream.ErrKeyNotFound
-	}
+	/*
+		if b.isExpiredKey(&val) {
+				err := b.kv(true).Delete(ctx, val.KV.Key, jetstream.LastRevision(uint64(rev)))
+				if err != nil {
+					b.l.Warnf("Failed to delete expired key %s: %v", val.KV.Key, err)
+				}
+			// Return a zero indicating the key was deleted.
+			return rev, &val, jetstream.ErrKeyNotFound
+		}
+	*/
 
 	return rev, &val, nil
 }
@@ -222,27 +222,27 @@ func (b *Backend) Create(ctx context.Context, key string, value []byte, lease in
 
 func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64, *server.KeyValue, bool, error) {
 	// Get the key, allow deletes.
-	rev, value, err := b.get(ctx, key, 0, true)
+	rev, pnv, err := b.get(ctx, key, 0, true)
 	if err != nil {
 		if err == jetstream.ErrKeyNotFound {
 			return rev, nil, true, nil
 		}
 		return rev, nil, false, err
 	}
-	if value == nil {
+	if pnv == nil {
 		return rev, nil, true, nil
 	}
-	if value.Delete {
-		return rev, value.KV, true, nil
+	if pnv.Delete {
+		return rev, pnv.KV, true, nil
 	}
-	if revision != 0 && value.KV.ModRevision != revision {
-		return rev, value.KV, false, nil
+	if revision != 0 && pnv.KV.ModRevision != revision {
+		return rev, pnv.KV, false, nil
 	}
 
 	nv := natsData{
 		Delete:       true,
 		PrevRevision: rev,
-		KV:           value.KV,
+		KV:           pnv.KV,
 	}
 	data, err := nv.Encode()
 	if err != nil {
@@ -256,7 +256,7 @@ func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64
 			b.l.Debugf("delete conflict: key=%s, rev=%d, err=%s", key, rev, err)
 			return 0, nil, false, nil
 		}
-		return rev, value.KV, false, nil
+		return rev, pnv.KV, false, nil
 	}
 
 	err = b.kv(true).Delete(ctx, key, jetstream.LastRevision(drev))
@@ -265,15 +265,15 @@ func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64
 			b.l.Debugf("delete conflict: key=%s, rev=%d, err=%s", key, drev, err)
 			return 0, nil, false, nil
 		}
-		return rev, value.KV, false, nil
+		return rev, pnv.KV, false, nil
 	}
 
-	return int64(drev), value.KV, true, nil
+	return int64(drev), pnv.KV, true, nil
 }
 
 func (b *Backend) Update(ctx context.Context, key string, value []byte, revision, lease int64) (int64, *server.KeyValue, bool, error) {
 	// Get the latest revision of the key.
-	rev, pnd, err := b.get(ctx, key, 0, false)
+	rev, pnv, err := b.get(ctx, key, 0, false)
 	// TODO: correct semantics for these various errors?
 	if err != nil {
 		if err == jetstream.ErrKeyNotFound {
@@ -283,32 +283,32 @@ func (b *Backend) Update(ctx context.Context, key string, value []byte, revision
 	}
 
 	// Return nothing?
-	if pnd == nil {
+	if pnv == nil {
 		return 0, nil, false, nil
 	}
 
 	// Incorrect revision, return the current value.
-	if pnd.KV.ModRevision != revision {
-		return rev, pnd.KV, false, nil
+	if pnv.KV.ModRevision != revision {
+		return rev, pnv.KV, false, nil
 	}
 
-	nd := natsData{
+	nv := natsData{
 		Delete:       false,
 		Create:       false,
-		PrevRevision: pnd.KV.ModRevision,
+		PrevRevision: pnv.KV.ModRevision,
 		KV: &server.KeyValue{
 			Key:            key,
-			CreateRevision: pnd.KV.CreateRevision,
+			CreateRevision: pnv.KV.CreateRevision,
 			Value:          value,
 			Lease:          lease,
 		},
 	}
 
-	if pnd.KV.CreateRevision == 0 {
-		nd.KV.CreateRevision = rev
+	if pnv.KV.CreateRevision == 0 {
+		nv.KV.CreateRevision = rev
 	}
 
-	data, err := nd.Encode()
+	data, err := nv.Encode()
 	if err != nil {
 		return 0, nil, false, err
 	}
@@ -323,9 +323,9 @@ func (b *Backend) Update(ctx context.Context, key string, value []byte, revision
 		return 0, nil, false, err
 	}
 
-	nd.KV.ModRevision = int64(seq)
+	nv.KV.ModRevision = int64(seq)
 
-	return int64(seq), nd.KV, true, nil
+	return int64(seq), nv.KV, true, nil
 }
 
 // List returns a range of keys starting with the prefix.

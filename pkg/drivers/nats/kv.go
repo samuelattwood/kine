@@ -320,8 +320,10 @@ func (e *KeyValue) BucketRevision() int64 {
 }
 
 func (e *KeyValue) btreeWatcher(ctx context.Context) error {
-	logrus.Debugf("%s: btree watcher: starting at %d", e.name, e.lastSeq)
-	w, err := e.Watch(ctx, "/", int64(e.lastSeq))
+	br := e.BucketRevision()
+
+	logrus.Debugf("%s: btree watcher: starting at %d", e.name, br)
+	w, err := e.Watch(ctx, "/", br)
 	if err != nil {
 		return fmt.Errorf("init: %s", err)
 	}
