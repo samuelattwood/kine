@@ -272,7 +272,7 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyW
 	}
 	cfg.DeliverPolicy = dp
 
-	con, err := e.js.OrderedConsumer(ctx, fmt.Sprintf("KV_%s", e.nkv.Bucket()), cfg)
+	con, err := e.js.OrderedConsumer(context.Background(), fmt.Sprintf("KV_%s", e.nkv.Bucket()), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating ordered consumer: %s", err)
 	}
