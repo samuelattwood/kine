@@ -172,11 +172,6 @@ func (m *Manager) initLocal(ctx context.Context) error {
 
 // initPeer initializes the peer connection and ensures the key-value bucket exists.
 func (m *Manager) initPeer(ctx context.Context) {
-	// Get a local copy to check.
-	m.mu.RLock()
-	pnc := m.pnc
-	m.mu.RUnlock()
-
 	opts := append([]nats.Option{}, m.PeerOpts...)
 	opts = append(opts,
 		nats.MaxReconnects(-1),
@@ -184,24 +179,35 @@ func (m *Manager) initPeer(ctx context.Context) {
 	)
 
 	var err error
-	if pnc == nil {
-		i := 0
-		for {
-			pnc, err = nats.Connect(m.PeerURL, opts...)
-			if err != nil {
-				i++
-				m.Logger.Warnf("init-peer: failed to connect: attempt %d: %s", i, err)
-				jitterSleep(time.Second)
-				continue
-			}
-			break
+
+	i := 0
+	var pnc *nats.Conn
+	for {
+		pnc, err = nats.Connect(m.PeerURL, opts...)
+		if err != nil {
+			i++
+			m.Logger.Warnf("init-peer: failed to connect: attempt %d: %s", i, err)
+			jitterSleep(time.Second)
+			continue
 		}
+		break
 	}
 
-	pjs, _ := jetstream.New(pnc)
+	i = 0
+	var pjs jetstream.JetStream
+	for {
+		pjs, err = jetstream.New(pnc)
+		if err != nil {
+			i++
+			m.Logger.Errorf("init-peer: failed to get JetStream context: attempt %d: %s", i, err)
+			jitterSleep(time.Second)
+			continue
+		}
+		break
+	}
 
+	i = 0
 	var pkv jetstream.KeyValue
-	i := 0
 	for {
 		pkv, err = pjs.KeyValue(ctx, m.KVConfig.Bucket)
 		if err != nil {
