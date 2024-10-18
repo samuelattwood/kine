@@ -439,11 +439,12 @@ func (m *Manager) Init(ctx context.Context) error {
 	// assume leadership.
 	if isConfiguredLeader {
 		var pnc *nats.Conn
+		isFollower := false
 
 		for i := 0; i < 3; i++ {
 			pnc, err = nats.Connect(m.PeerURL, m.PeerOpts...)
 			if err != nil {
-				m.Logger.Warnf("init-peer: failed to connect: attempt %d: %s", i+1, err)
+				m.Logger.Warnf("init: failed to connect to peer: attempt %d: %s", i+1, err)
 				jitterSleep(time.Second)
 				continue
 			}
@@ -460,16 +461,20 @@ func (m *Manager) Init(ctx context.Context) error {
 			// If the peer is a leader or leaderRX, continue.
 			if peerState.State == keys.Leader || peerState.State == keys.LeaderRX {
 				m.Logger.Infof("init: peer is leader")
+				isFollower = true
 				break
 			}
 
-			// Peer is not the leader, so assume leadership if we are the configured leader.
-			m.isLeader = true
-			m.Logger.Infof("init: assuming leadership, configured leader without peer leader state")
 			break
 		}
 		if pnc != nil {
 			pnc.Close()
+		}
+
+		// If not explicitly indicated as a follower, assume leadership.
+		if !isFollower {
+			m.isLeader = true
+			m.Logger.Infof("init: assuming leadership, configured leader without peer leader state")
 		}
 	}
 
