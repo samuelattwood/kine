@@ -118,6 +118,7 @@ type KeyValue struct {
 	bt      *btree.Map[string, []*seqOp]
 	btm     sync.RWMutex
 	lastSeq uint64
+	ctx     context.Context
 	cancel  context.CancelFunc
 }
 
@@ -338,9 +339,6 @@ func (e *KeyValue) btreeWatcher(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ctx.Done():
-			return fmt.Errorf("context: %s", ctx.Err())
-
 		case err := <-w.Err():
 			return fmt.Errorf("error: %s", err)
 
@@ -527,6 +525,7 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 
 func (e *KeyValue) Stop() {
 	e.cancel()
+	<-e.ctx.Done()
 }
 
 func NewKeyValue(ctx context.Context, name string, bucket jetstream.KeyValue, js jetstream.JetStream) *KeyValue {
@@ -539,6 +538,7 @@ func NewKeyValue(ctx context.Context, name string, bucket jetstream.KeyValue, js
 		kc:     &keyCodec{},
 		vc:     &valueCodec{},
 		bt:     btree.NewMap[string, []*seqOp](0),
+		ctx:    ctx,
 		cancel: cancel,
 	}
 

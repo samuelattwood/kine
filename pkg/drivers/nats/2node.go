@@ -32,34 +32,35 @@ type Manager struct {
 
 	Logger *logrus.Logger
 
-	TNEConfig string
+	tneConfig string
 
-	// Local and peer connections.
-	lnc *nats.Conn
-	pnc *nats.Conn
+	// tne instance.
+	tne *tne.TNE
 
-	ljs jetstream.JetStream
-	pjs jetstream.JetStream
+	// Mutex to protect the state.
+	mu sync.RWMutex
 
-	// Local and peer key-value stores.
-	lkv jetstream.KeyValue
-	pkv jetstream.KeyValue
+	// Local references.
+	lnc  *nats.Conn
+	ljs  jetstream.JetStream
+	lkv  jetstream.KeyValue
+	lkkv *KeyValue
+
+	// Peer references.
+	pnc  *nats.Conn
+	pjs  jetstream.JetStream
+	pkv  jetstream.KeyValue
+	pkkv *KeyValue
 
 	// If true, indicates the local node is the leader.
 	isLeader        bool
 	leadershipState keys.LeadershipState
 
-	lkkv   *KeyValue
-	pkkv   *KeyValue
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	// Consumer context to the peer stream when replicating.
 	cctx jetstream.ConsumeContext
-
-	mu sync.RWMutex
-
-	tne *tne.TNE
 }
 
 func (m *Manager) GetState() keys.LeadershipState {
@@ -76,6 +77,7 @@ func (m *Manager) GetState() keys.LeadershipState {
 // from the leader.
 func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (jetstream.Stream, error) {
 	m.Logger.Infof("init-local: checking if bucket %s exists", m.KVConfig.Bucket)
+
 	var exists bool
 	kv, err := m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
 	if err == nil {
@@ -103,7 +105,6 @@ func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (je
 	if !exists {
 		m.Logger.Infof("info-local: creating bucket %s with sequence %d", m.KVConfig.Bucket, seq)
 
-		// TODO: update to nats.go 1.33.1 which has the "first revision" option.
 		cfg := jetstream.StreamConfig{
 			Name:              fmt.Sprintf("KV_%s", m.KVConfig.Bucket),
 			Description:       m.KVConfig.Description,
@@ -161,13 +162,11 @@ func (m *Manager) startLocal(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init-local: failed to create local connection: %w", err)
 	}
-	m.lnc = nc
 
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return fmt.Errorf("init-local: failed to get JetStream context: %w", err)
 	}
-	m.ljs = js
 
 	// Create the bucket if it doesn't exist. Note, this is a no-op if the bucket
 	// already exists with the same configuration.
@@ -175,6 +174,9 @@ func (m *Manager) startLocal(ctx context.Context) error {
 		return err
 	}
 	m.Logger.Infof("init-local: bucket initialized: %s", m.KVConfig.Bucket)
+
+	m.lnc = nc
+	m.ljs = js
 
 	return nil
 }
@@ -204,9 +206,9 @@ func (m *Manager) startPeer(ctx context.Context) {
 	var err error
 
 	i := 0
-	var pnc *nats.Conn
+	var nc *nats.Conn
 	for {
-		pnc, err = nats.Connect(m.PeerURL, opts...)
+		nc, err = nats.Connect(m.PeerURL, opts...)
 		if err != nil {
 			i++
 			m.Logger.Warnf("init-peer: failed to connect: attempt %d: %s", i, err)
@@ -217,9 +219,9 @@ func (m *Manager) startPeer(ctx context.Context) {
 	}
 
 	i = 0
-	var pjs jetstream.JetStream
+	var js jetstream.JetStream
 	for {
-		pjs, err = jetstream.New(pnc)
+		js, err = jetstream.New(nc)
 		if err != nil {
 			i++
 			m.Logger.Errorf("init-peer: failed to get JetStream context: attempt %d: %s", i, err)
@@ -230,9 +232,9 @@ func (m *Manager) startPeer(ctx context.Context) {
 	}
 
 	i = 0
-	var pkv jetstream.KeyValue
+	var kv jetstream.KeyValue
 	for {
-		pkv, err = pjs.KeyValue(ctx, m.KVConfig.Bucket)
+		kv, err = js.KeyValue(ctx, m.KVConfig.Bucket)
 		if err != nil {
 			i++
 			m.Logger.Warnf("init-peer: failed to get KV: attempt %d: %s", i, err)
@@ -242,10 +244,10 @@ func (m *Manager) startPeer(ctx context.Context) {
 		break
 	}
 
-	m.pnc = pnc
-	m.pjs = pjs
-	m.pkv = pkv
-	m.pkkv = NewKeyValue(ctx, "peer", pkv, pjs)
+	m.pnc = nc
+	m.pjs = js
+	m.pkv = kv
+	m.pkkv = NewKeyValue(ctx, "peer", kv, js)
 
 	m.Logger.Infof("init-peer: connected to peer: %s", m.PeerURL)
 }
@@ -263,7 +265,8 @@ func (m *Manager) getLocalLastSeq(ctx context.Context) (uint64, error) {
 func (m *Manager) stopStreamReplication() {
 	if m.cctx != nil {
 		m.Logger.Infof("stopping stream replication")
-		m.cctx.Stop()
+		m.cctx.Drain()
+		<-m.cctx.Closed()
 		m.cctx = nil
 	}
 }
@@ -316,38 +319,46 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 		// For example, if the local sequence is 10 and the replicated message
 		// sequence is 15, then we need to publish tombstones for 11-14.
 		if md.Sequence.Stream != seq+1 {
+			if md.Sequence.Stream <= seq {
+				panic(fmt.Sprintf("sequence regression: %d -> %d", seq, md.Sequence.Stream))
+			}
+
 			m.Logger.Debugf("gap detected: %d -> %d", seq, md.Sequence.Stream)
 			num := int(md.Sequence.Stream-seq) - 1
 
 			for i := 0; i < num; i++ {
 				subject := fmt.Sprintf("$KV.%s.__tomb", m.KVConfig.Bucket)
-				pa, err := m.ljs.Publish(ctx, subject, nil)
+				_, err := m.ljs.Publish(ctx, subject, nil)
 				if err != nil {
 					m.Logger.Debugf("failed to publish tombstone: %s", err)
 					continue
 				}
-				// TODO: necessary to delete tombstones?
-				err = str.DeleteMsg(ctx, pa.Sequence)
-				if err != nil {
-					m.Logger.Debugf("failed to delete tombstone @ %d: %s", i, err)
-				}
+				/*
+					// TODO: necessary to delete tombstones?
+					err = str.DeleteMsg(ctx, pa.Sequence)
+					if err != nil {
+						m.Logger.Debugf("failed to delete tombstone @ %d: %s", i, err)
+					}
+				*/
 			}
 		}
 
 		nmsg := nats.NewMsg(msg.Subject())
 		nmsg.Data = msg.Data()
 
-		hdrs := msg.Headers()
-		if len(hdrs) > 0 {
-			// Delete the expected last sequence header since that will result in
-			// the local server enforcing it which would not work for the first message
-			// of each individual subject (since there is no existing history). Instead,
-			// for posterity, we'll store it in a separate header suffixed with -Peer.
-			expHdr := hdrs.Get(nats.ExpectedLastSubjSeqHdr)
-			hdrs.Del(nats.ExpectedLastSubjSeqHdr)
-			hdrs.Set(fmt.Sprintf("%s-Peer", nats.ExpectedLastSubjSeqHdr), expHdr)
-			nmsg.Header = hdrs
-		}
+		/*
+			hdrs := msg.Headers()
+			if len(hdrs) > 0 {
+				// Delete the expected last sequence header since that will result in
+				// the local server enforcing it which would not work for the first message
+				// of each individual subject (since there is no existing history). Instead,
+				// for posterity, we'll store it in a separate header suffixed with -Peer.
+				expHdr := hdrs.Get(nats.ExpectedLastSubjSeqHdr)
+				hdrs.Del(nats.ExpectedLastSubjSeqHdr)
+				hdrs.Set(fmt.Sprintf("%s-Peer", nats.ExpectedLastSubjSeqHdr), expHdr)
+				nmsg.Header = hdrs
+			}
+		*/
 
 		pa, err := m.ljs.PublishMsg(ctx, nmsg)
 		if err != nil {
@@ -356,7 +367,7 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 
 		seq = pa.Sequence
 		if pa.Sequence != md.Sequence.Stream {
-			m.Logger.Debugf("sequence mismatch: %d -> %d", md.Sequence.Stream, pa.Sequence)
+			panic(fmt.Sprintf("sequence mismatch: %d -> %d", md.Sequence.Stream, pa.Sequence))
 		}
 
 		numRemaining--
@@ -386,6 +397,9 @@ func (m *Manager) stopPeer() {
 	}
 
 	m.pnc.Drain()
+	for m.pnc.IsDraining() {
+		time.Sleep(10 * time.Millisecond)
+	}
 	m.pnc = nil
 	m.pjs = nil
 	m.pkv = nil
@@ -399,6 +413,9 @@ func (m *Manager) stopLocal() {
 	}
 
 	m.lnc.Drain()
+	for m.lnc.IsDraining() {
+		time.Sleep(10 * time.Millisecond)
+	}
 	m.lnc = nil
 	m.ljs = nil
 	m.lkv = nil
@@ -406,47 +423,72 @@ func (m *Manager) stopLocal() {
 	m.lkkv = nil
 }
 
+func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.LeadershipKVState, tch <-chan keys.TransitioningKVState) {
+	for {
+		select {
+		case ls := <-lch:
+			m.Logger.Infof("leadership state change: %v", ls.State)
+
+			m.mu.Lock()
+
+			m.leadershipState = ls.State
+
+			switch ls.State {
+			case keys.Leader, keys.LeaderRX:
+				if !m.isLeader {
+					m.isLeader = true
+					m.stopStreamReplication()
+					m.stopPeer()
+				}
+
+			case keys.Follower, keys.Impaired:
+				if m.isLeader {
+					m.isLeader = false
+					m.startPeer(m.ctx)
+
+					done := make(chan error)
+					go m.startStreamReplication(ctx, done)
+					select {
+					case err := <-done:
+						if err != nil {
+							m.Logger.Warnf("failed to start stream replication: %s", err)
+						}
+						// TODO: make configurable?
+					case <-time.After(3 * time.Second):
+						m.Logger.Warnf("timed out waiting for stream replication to start")
+					}
+				}
+			}
+
+			m.mu.Unlock()
+
+		case ts := <-tch:
+			if !ts.State {
+				break
+			}
+
+			m.tne.DoneTransitioning(ts.Leadership)
+		}
+	}
+}
+
 func (m *Manager) Init(ctx context.Context) error {
 	cctx, cancel := context.WithCancel(ctx)
 	m.ctx = cctx
 	m.cancel = cancel
 
-	tne, err := tne.New(m.TNEConfig)
+	tne, err := tne.New(m.tneConfig)
 	if err != nil {
-		return fmt.Errorf("failed to initialze TNE: %w", err)
+		return fmt.Errorf("failed to initialze tne: %w", err)
 	}
 
 	tne.NatsURL = m.LocalURL
 	if err := tne.Start(cctx); err != nil {
-		return fmt.Errorf("failed to start TNE: %w", err)
+		return fmt.Errorf("failed to start tne: %w", err)
 	}
 
 	m.tne = tne
-	m.Logger.Infof("TNE started")
-
-	// Initialize local. If this fails, we can't continue.
-	if err := m.startLocal(cctx); err != nil {
-		cancel()
-		return err
-	}
-	m.Logger.Infof("local initialized")
-
-	errch := make(chan error, 1)
-
-	// Setup TNE watchers.
-	lch := make(chan keys.LeadershipKVState, 1)
-	go func() {
-		if err := m.tne.WatchLeadership(ctx, lch); err != nil {
-			errch <- fmt.Errorf("failed to watch leadership: %w", err)
-		}
-	}()
-
-	tch := make(chan keys.TransitioningKVState, 1)
-	go func() {
-		if err := m.tne.WatchTransitioning(ctx, tch); err != nil {
-			errch <- fmt.Errorf("failed to watch transitioning: %w", err)
-		}
-	}()
+	m.Logger.Infof("tne started")
 
 	// Check if we are the configured leader.
 	isConfiguredLeader, err := tne.IsConfiguredLeader()
@@ -499,66 +541,31 @@ func (m *Manager) Init(ctx context.Context) error {
 		}
 	}
 
+	// Initialize local. If this fails, we can't continue.
+	if err := m.startLocal(cctx); err != nil {
+		cancel()
+		return err
+	}
+	m.Logger.Infof("local initialized")
+
+	errch := make(chan error, 1)
+
+	// Setup tne watchers.
+	lch := make(chan keys.LeadershipKVState, 1)
 	go func() {
-		for {
-			select {
-			case ls := <-lch:
-				m.Logger.Infof("leadership state change: %v", ls.State)
-
-				t0 := time.Now()
-
-				m.mu.Lock()
-
-				m.leadershipState = ls.State
-
-				switch ls.State {
-				case keys.Leader, keys.LeaderRX:
-					if !m.isLeader {
-						m.isLeader = true
-						m.stopStreamReplication()
-						m.stopPeer()
-					}
-
-				case keys.Follower, keys.Impaired:
-					if m.isLeader {
-						m.isLeader = false
-						m.startPeer(m.ctx)
-
-						done := make(chan error)
-						go m.startStreamReplication(ctx, done)
-						select {
-						case err := <-done:
-							if err != nil {
-								m.Logger.Warnf("failed to start stream replication: %s", err)
-							}
-							// TODO: make configurable?
-						case <-time.After(3 * time.Second):
-							m.Logger.Warnf("timed out waiting for stream replication to start")
-						}
-					}
-				}
-
-				m.mu.Unlock()
-
-				m.Logger.Infof("leadership state transitioned in %s", time.Since(t0))
-
-			case ts := <-tch:
-				m.Logger.Infof("received transitioning event: %v", ts)
-				if !ts.State {
-					break
-				}
-
-				m.Logger.Infof("transitioning leadership state to: %v", ts.Leadership)
-
-				switch ts.Leadership {
-				case keys.Leader, keys.LeaderRX:
-				case keys.Follower, keys.Impaired:
-				}
-
-				m.tne.DoneTransitioning(ts.Leadership)
-			}
+		if err := m.tne.WatchLeadership(ctx, lch); err != nil {
+			errch <- fmt.Errorf("failed to watch leadership: %w", err)
 		}
 	}()
+
+	tch := make(chan keys.TransitioningKVState, 1)
+	go func() {
+		if err := m.tne.WatchTransitioning(ctx, tch); err != nil {
+			errch <- fmt.Errorf("failed to watch transitioning: %w", err)
+		}
+	}()
+
+	go m.handleStateChanges(ctx, lch, tch)
 
 	// Attempt to initialize the peer in the background if we are the leader.
 	// Otherwise, initialize the peer in the foreground and start stream replication.
@@ -593,9 +600,9 @@ func (m *Manager) Init(ctx context.Context) error {
 		case <-sigch:
 			m.Logger.Info("received interrupt, stopping")
 		case err := <-m.tne.Err():
-			m.Logger.Errorf("TNE error: %s", err)
+			m.Logger.Errorf("tne error: %s", err)
 		case err := <-errch:
-			m.Logger.Errorf("TNE watch error: %s", err)
+			m.Logger.Errorf("tne watch error: %s", err)
 		}
 		m.Stop()
 	}()
