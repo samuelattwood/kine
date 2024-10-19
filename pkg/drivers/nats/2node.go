@@ -75,67 +75,77 @@ func (m *Manager) GetState() keys.LeadershipState {
 // node is transitioning to the follower and the bucket will re-copy the data
 // from the leader.
 func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (jetstream.Stream, error) {
-	// If an explicit sequence number is provided, re-create the bucket.
-	// Otherwise, check if the bucket exists.
-	if del {
-		// Cancel the previous KV instance to stop the watchers.
-		if m.lkkv != nil {
-			m.lkkv.Stop()
-		}
+	m.Logger.Infof("into-local: checking if bucket %s exists", m.KVConfig.Bucket)
+	var exists bool
+	kv, err := m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
+	if err == nil {
+		exists = true
+	} else if errors.Is(err, jetstream.ErrBucketNotFound) {
+		exists = false
+	} else {
+		return nil, fmt.Errorf("init-local: failed to get KV: %w", err)
+	}
 
-		m.Logger.Infof("init-local: re-creating bucket %s with sequence %d", m.KVConfig.Bucket, seq)
+	// Cancel the previous KV instance to stop the watchers.
+	if m.lkkv != nil {
+		m.lkkv.Stop()
+	}
+
+	// Ensure references are setup.
+	if del && !exists {
 		err := m.ljs.DeleteKeyValue(ctx, m.KVConfig.Bucket)
 		if err != nil {
 			m.Logger.Errorf("init-local: failed to delete bucket %s: %s", m.KVConfig.Bucket, err)
 		}
-	} else {
-		m.Logger.Infof("into-local: checking if bucket %s exists", m.KVConfig.Bucket)
-		_, err := m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
-		if err == nil {
-			m.lkv, _ = m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
-			return m.ljs.Stream(ctx, fmt.Sprintf("KV_%s", m.KVConfig.Bucket))
+		exists = false
+	}
+
+	if !exists {
+		m.Logger.Infof("info-local: creating bucket %s with sequence %d", m.KVConfig.Bucket, seq)
+
+		// TODO: update to nats.go 1.33.1 which has the "first revision" option.
+		scfg := jetstream.StreamConfig{
+			Name:              fmt.Sprintf("KV_%s", m.KVConfig.Bucket),
+			Description:       m.KVConfig.Description,
+			Subjects:          []string{fmt.Sprintf("$KV.%s.>", m.KVConfig.Bucket)},
+			Storage:           jetstream.FileStorage,
+			Replicas:          m.KVConfig.Replicas,
+			MaxMsgsPerSubject: int64(m.KVConfig.History),
+			AllowRollup:       true,
+			DenyDelete:        false,
+			AllowDirect:       true,
+			FirstSeq:          seq,
+			MaxBytes:          -1,
+			MaxMsgSize:        -1,
+			MaxMsgs:           -1,
+			MaxConsumers:      -1,
 		}
-		m.Logger.Infof("info-local: creating bucket %s", m.KVConfig.Bucket)
-	}
 
-	// TODO: update to nats.go 1.33.1 which has the "first revision" option.
-	scfg := jetstream.StreamConfig{
-		Name:              fmt.Sprintf("KV_%s", m.KVConfig.Bucket),
-		Description:       m.KVConfig.Description,
-		Subjects:          []string{fmt.Sprintf("$KV.%s.>", m.KVConfig.Bucket)},
-		Storage:           jetstream.FileStorage,
-		Replicas:          m.KVConfig.Replicas,
-		MaxMsgsPerSubject: int64(m.KVConfig.History),
-		AllowRollup:       true,
-		DenyDelete:        false,
-		AllowDirect:       true,
-		FirstSeq:          seq,
-		MaxBytes:          -1,
-		MaxMsgSize:        -1,
-		MaxMsgs:           -1,
-		MaxConsumers:      -1,
-	}
+		for {
+			str, err := m.ljs.CreateStream(ctx, scfg)
+			if err == nil {
+				kv, err = m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
+				if err != nil {
+					return nil, fmt.Errorf("init-local: failed to get KV: %w", err)
+				}
 
-	for {
-		str, err := m.ljs.CreateStream(ctx, scfg)
-		if err == nil {
-			m.lkv, err = m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
-			if err != nil {
-				return nil, fmt.Errorf("init-local: failed to get KV: %w", err)
+				m.lkkv = NewKeyValue(ctx, "local", m.lkv, m.ljs)
+				return str, nil
 			}
 
-			m.lkkv = NewKeyValue(ctx, "local", m.lkv, m.ljs)
-			return str, nil
-		}
+			// If JetStream is not yet available, retry.
+			if errors.Is(err, context.DeadlineExceeded) {
+				m.Logger.Warnf("init-local: timed out waiting for bucket %s to be created. retrying", m.KVConfig.Bucket)
+				continue
+			}
 
-		// If JetStream is not yet available, retry.
-		if errors.Is(err, context.DeadlineExceeded) {
-			m.Logger.Warnf("init-local: timed out waiting for bucket %s to be created. retrying", m.KVConfig.Bucket)
-			continue
+			return nil, fmt.Errorf("init-local: failed to initialize KV bucket: %w", err)
 		}
-
-		return nil, fmt.Errorf("init-local: failed to initialize KV bucket: %w", err)
 	}
+
+	m.lkv = kv
+	m.lkkv = NewKeyValue(ctx, "local", m.lkv, m.ljs)
+	return m.ljs.Stream(ctx, fmt.Sprintf("KV_%s", m.KVConfig.Bucket))
 }
 
 // startLocal initializes the local connection and ensures the key-value bucket exists.
@@ -287,15 +297,11 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 	numRemaining := numPending
 	var t0 time.Time
 
-	first := true
 	// Keep track of the last sequence number that was published.
 	seq := uint64(0)
-	str, err := m.ljs.Stream(ctx, sname)
-	if err != nil {
-		done <- fmt.Errorf("failed to get local stream: %w", err)
-		return
-	}
+	first := true
 
+	var str jetstream.Stream
 	msgHandler := func(msg jetstream.Msg) {
 		md, _ := msg.Metadata()
 
@@ -331,6 +337,7 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 					m.Logger.Debugf("failed to publish tombstone: %s", err)
 					continue
 				}
+				// TODO: necessary to delete tombstones?
 				err = str.DeleteMsg(ctx, pa.Sequence)
 				if err != nil {
 					m.Logger.Debugf("failed to delete tombstone @ %d: %s", i, err)
