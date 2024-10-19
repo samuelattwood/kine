@@ -168,15 +168,15 @@ func (m *Manager) startLocal(ctx context.Context) error {
 		return fmt.Errorf("init-local: failed to get JetStream context: %w", err)
 	}
 
+	m.lnc = nc
+	m.ljs = js
+
 	// Create the bucket if it doesn't exist. Note, this is a no-op if the bucket
 	// already exists with the same configuration.
 	if _, err := m.initLocalBucket(ctx, 0, false); err != nil {
 		return err
 	}
 	m.Logger.Infof("init-local: bucket initialized: %s", m.KVConfig.Bucket)
-
-	m.lnc = nc
-	m.ljs = js
 
 	return nil
 }
