@@ -75,7 +75,7 @@ func (m *Manager) GetState() keys.LeadershipState {
 // node is transitioning to the follower and the bucket will re-copy the data
 // from the leader.
 func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (jetstream.Stream, error) {
-	m.Logger.Infof("into-local: checking if bucket %s exists", m.KVConfig.Bucket)
+	m.Logger.Infof("init-local: checking if bucket %s exists", m.KVConfig.Bucket)
 	var exists bool
 	kv, err := m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
 	if err == nil {
@@ -410,6 +410,7 @@ func (m *Manager) stopLocal() {
 	}
 
 	m.lnc.Drain()
+	m.lnc = nil
 	m.ljs = nil
 	m.lkv = nil
 	m.lkkv.Stop()
@@ -518,7 +519,6 @@ func (m *Manager) Init(ctx context.Context) error {
 				t0 := time.Now()
 
 				m.mu.Lock()
-				defer m.mu.Unlock()
 
 				m.leadershipState = ls.State
 
@@ -548,6 +548,8 @@ func (m *Manager) Init(ctx context.Context) error {
 						}
 					}
 				}
+
+				m.mu.Unlock()
 
 				m.Logger.Infof("leadership state transitioned in %s", time.Since(t0))
 
