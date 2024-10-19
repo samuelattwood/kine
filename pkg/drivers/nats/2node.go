@@ -134,14 +134,12 @@ func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (je
 			continue
 		}
 
-		if err != nil {
-			return nil, fmt.Errorf("init-local: failed to initialize KV bucket: %w", err)
-		}
+		return nil, fmt.Errorf("init-local: failed to initialize KV bucket: %w", err)
 	}
 }
 
-// initLocal initializes the local connection and ensures the key-value bucket exists.
-func (m *Manager) initLocal(ctx context.Context) error {
+// startLocal initializes the local connection and ensures the key-value bucket exists.
+func (m *Manager) startLocal(ctx context.Context) error {
 	opts := append([]nats.Option{}, m.LocalOpts...)
 	opts = append(opts,
 		nats.MaxReconnects(-1),
@@ -182,8 +180,10 @@ func (m *Manager) initLocal(ctx context.Context) error {
 	return nil
 }
 
-// initPeer initializes the peer connection and ensures the key-value bucket exists.
-func (m *Manager) initPeer(ctx context.Context) {
+// startPeer initializes the peer connection and ensures the key-value bucket exists.
+func (m *Manager) startPeer(ctx context.Context) {
+	m.stopPeer()
+
 	opts := append([]nats.Option{}, m.PeerOpts...)
 	opts = append(opts,
 		nats.MaxReconnects(-1),
@@ -243,11 +243,10 @@ func (m *Manager) initPeer(ctx context.Context) {
 		break
 	}
 
-	m.mu.Lock()
 	m.pnc = pnc
 	m.pjs = pjs
+	m.pkv = pkv
 	m.pkkv = NewKeyValue(ctx, "peer", pkv, pjs)
-	m.mu.Unlock()
 
 	m.Logger.Infof("init-peer: connected to peer: %s", m.PeerURL)
 }
@@ -385,6 +384,31 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 	m.Logger.Infof("started stream replication")
 }
 
+func (m *Manager) stopPeer() {
+	if m.pnc == nil {
+		return
+	}
+
+	m.pnc.Drain()
+	m.pnc = nil
+	m.pjs = nil
+	m.pkv = nil
+	m.pkkv.Stop()
+	m.pkkv = nil
+}
+
+func (m *Manager) stopLocal() {
+	if m.lnc == nil {
+		return
+	}
+
+	m.lnc.Drain()
+	m.ljs = nil
+	m.lkv = nil
+	m.lkkv.Stop()
+	m.lkkv = nil
+}
+
 func (m *Manager) Init(ctx context.Context) error {
 	cctx, cancel := context.WithCancel(ctx)
 	m.ctx = cctx
@@ -404,7 +428,7 @@ func (m *Manager) Init(ctx context.Context) error {
 	m.Logger.Infof("TNE started")
 
 	// Initialize local. If this fails, we can't continue.
-	if err := m.initLocal(cctx); err != nil {
+	if err := m.startLocal(cctx); err != nil {
 		cancel()
 		return err
 	}
@@ -484,8 +508,10 @@ func (m *Manager) Init(ctx context.Context) error {
 			case ls := <-lch:
 				m.Logger.Infof("leadership state change: %v", ls.State)
 
-				m.mu.Lock()
 				t0 := time.Now()
+
+				m.mu.Lock()
+				defer m.mu.Unlock()
 
 				m.leadershipState = ls.State
 
@@ -494,11 +520,14 @@ func (m *Manager) Init(ctx context.Context) error {
 					if !m.isLeader {
 						m.isLeader = true
 						m.stopStreamReplication()
+						m.stopPeer()
 					}
 
 				case keys.Follower, keys.Impaired:
 					if m.isLeader {
 						m.isLeader = false
+						m.startPeer(m.ctx)
+
 						done := make(chan error)
 						go m.startStreamReplication(ctx, done)
 						select {
@@ -506,6 +535,7 @@ func (m *Manager) Init(ctx context.Context) error {
 							if err != nil {
 								m.Logger.Warnf("failed to start stream replication: %s", err)
 							}
+							// TODO: make configurable?
 						case <-time.After(3 * time.Second):
 							m.Logger.Warnf("timed out waiting for stream replication to start")
 						}
@@ -513,8 +543,6 @@ func (m *Manager) Init(ctx context.Context) error {
 				}
 
 				m.Logger.Infof("leadership state transitioned in %s", time.Since(t0))
-
-				m.mu.Unlock()
 
 			case ts := <-tch:
 				m.Logger.Infof("received transitioning event: %v", ts)
@@ -538,11 +566,13 @@ func (m *Manager) Init(ctx context.Context) error {
 	// Otherwise, initialize the peer in the foreground and start stream replication.
 	if m.isLeader {
 		m.Logger.Infof("init: starting as leader")
-		go m.initPeer(cctx)
-		m.Logger.Infof("init-peer: initialization started in background")
+		//go m.initPeer(cctx, true)
+		//m.Logger.Infof("init-peer: initialization started in background")
 	} else {
 		m.Logger.Infof("init: starting as follower")
-		m.initPeer(cctx)
+		m.mu.Lock()
+		m.startPeer(cctx)
+		m.mu.Unlock()
 		m.Logger.Infof("init-peer: initialization started")
 
 		// Used to signal when the catchup is complete.
@@ -576,16 +606,16 @@ func (m *Manager) Init(ctx context.Context) error {
 }
 
 func (m *Manager) Stop() {
+	ctx := m.ctx
 	m.cancel()
-	m.tne.Stop(context.Background())
-	if m.lnc != nil {
-		m.lnc.Drain()
-	}
-	m.mu.RLock()
-	if m.pnc != nil {
-		m.pnc.Drain()
-	}
-	m.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.stopStreamReplication()
+	m.stopPeer()
+	m.stopLocal()
+	m.tne.Stop(ctx)
 }
 
 func (m *Manager) KeyValue(write bool) *KeyValue {
