@@ -104,7 +104,7 @@ func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (je
 		m.Logger.Infof("info-local: creating bucket %s with sequence %d", m.KVConfig.Bucket, seq)
 
 		// TODO: update to nats.go 1.33.1 which has the "first revision" option.
-		scfg := jetstream.StreamConfig{
+		cfg := jetstream.StreamConfig{
 			Name:              fmt.Sprintf("KV_%s", m.KVConfig.Bucket),
 			Description:       m.KVConfig.Description,
 			Subjects:          []string{fmt.Sprintf("$KV.%s.>", m.KVConfig.Bucket)},
@@ -121,25 +121,14 @@ func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (je
 			MaxConsumers:      -1,
 		}
 
-		for {
-			str, err := m.ljs.CreateStream(ctx, scfg)
-			if err == nil {
-				kv, err = m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
-				if err != nil {
-					return nil, fmt.Errorf("init-local: failed to get KV: %w", err)
-				}
+		_, err := m.ljs.CreateStream(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("init-local: failed to create stream: %w", err)
+		}
 
-				m.lkkv = NewKeyValue(ctx, "local", m.lkv, m.ljs)
-				return str, nil
-			}
-
-			// If JetStream is not yet available, retry.
-			if errors.Is(err, context.DeadlineExceeded) {
-				m.Logger.Warnf("init-local: timed out waiting for bucket %s to be created. retrying", m.KVConfig.Bucket)
-				continue
-			}
-
-			return nil, fmt.Errorf("init-local: failed to initialize KV bucket: %w", err)
+		kv, err = m.ljs.KeyValue(ctx, m.KVConfig.Bucket)
+		if err != nil {
+			return nil, fmt.Errorf("init-local: failed to get KV: %w", err)
 		}
 	}
 
