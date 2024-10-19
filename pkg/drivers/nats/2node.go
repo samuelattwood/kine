@@ -32,7 +32,7 @@ type Manager struct {
 
 	Logger *logrus.Logger
 
-	tneConfig string
+	TNEConfig string
 
 	// tne instance.
 	tne *tne.TNE
@@ -293,7 +293,7 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 	seq := uint64(0)
 	first := true
 
-	var str jetstream.Stream
+	//var str jetstream.Stream
 	msgHandler := func(msg jetstream.Msg) {
 		md, _ := msg.Metadata()
 
@@ -302,7 +302,7 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 			t0 = time.Now()
 			// Initialize a bucket with one less than the peer's starting sequence.
 			// This ensures when we publish the first message, the sequences match.
-			str, err = m.initLocalBucket(ctx, md.Sequence.Stream-1, true)
+			_, err = m.initLocalBucket(ctx, md.Sequence.Stream-1, true)
 			if err != nil {
 				done <- fmt.Errorf("failed to initialize local bucket: %w", err)
 				return
@@ -477,7 +477,7 @@ func (m *Manager) Init(ctx context.Context) error {
 	m.ctx = cctx
 	m.cancel = cancel
 
-	tne, err := tne.New(m.tneConfig)
+	tne, err := tne.New(m.TNEConfig)
 	if err != nil {
 		return fmt.Errorf("failed to initialze tne: %w", err)
 	}
