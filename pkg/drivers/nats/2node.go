@@ -291,26 +291,28 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 
 	// Keep track of the last sequence number that was published.
 	seq := uint64(0)
-	first := true
+	pstr, err := m.pjs.Stream(ctx, sname)
+	if err != nil {
+		done <- fmt.Errorf("failed to get peer stream: %w", err)
+		return
+	}
+
+	// Initial first seq. This will be caught and gaps filled in the message handler.
+	firstSeq := pstr.CachedInfo().State.FirstSeq
+	if firstSeq > 0 {
+		seq = firstSeq - 1
+	}
+	logrus.Debugf("stream replication starting @ %d", seq)
+
+	lstr, err := m.initLocalBucket(ctx, seq, true)
+	if err != nil {
+		done <- fmt.Errorf("failed to initialize local bucket: %w", err)
+		return
+	}
 
 	//var str jetstream.Stream
 	msgHandler := func(msg jetstream.Msg) {
 		md, _ := msg.Metadata()
-
-		if first {
-			first = false
-			t0 = time.Now()
-			// Initialize a bucket with one less than the peer's starting sequence.
-			// This ensures when we publish the first message, the sequences match.
-			_, err = m.initLocalBucket(ctx, md.Sequence.Stream-1, true)
-			if err != nil {
-				done <- fmt.Errorf("failed to initialize local bucket: %w", err)
-				return
-			}
-
-			// Set the initial expected sequence.
-			seq = md.Sequence.Stream - 1
-		}
 
 		// Compare the last sequence we published to the replicated message.
 		// If they don't match, this indicates a gap due to interior deletes
@@ -327,38 +329,34 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 			num := int(md.Sequence.Stream-seq) - 1
 
 			for i := 0; i < num; i++ {
-				subject := fmt.Sprintf("$KV.%s.__tomb", m.KVConfig.Bucket)
-				_, err := m.ljs.Publish(ctx, subject, nil)
+				subject := fmt.Sprintf("$KV.%s._T", m.KVConfig.Bucket)
+				pa, err := m.ljs.Publish(ctx, subject, nil)
 				if err != nil {
 					m.Logger.Debugf("failed to publish tombstone: %s", err)
 					continue
 				}
-				/*
-					// TODO: necessary to delete tombstones?
-					err = str.DeleteMsg(ctx, pa.Sequence)
-					if err != nil {
-						m.Logger.Debugf("failed to delete tombstone @ %d: %s", i, err)
-					}
-				*/
+
+				err = lstr.DeleteMsg(ctx, pa.Sequence)
+				if err != nil {
+					m.Logger.Debugf("failed to delete tombstone @ %d: %s", i, err)
+				}
 			}
 		}
 
 		nmsg := nats.NewMsg(msg.Subject())
 		nmsg.Data = msg.Data()
 
-		/*
-			hdrs := msg.Headers()
-			if len(hdrs) > 0 {
-				// Delete the expected last sequence header since that will result in
-				// the local server enforcing it which would not work for the first message
-				// of each individual subject (since there is no existing history). Instead,
-				// for posterity, we'll store it in a separate header suffixed with -Peer.
-				expHdr := hdrs.Get(nats.ExpectedLastSubjSeqHdr)
-				hdrs.Del(nats.ExpectedLastSubjSeqHdr)
-				hdrs.Set(fmt.Sprintf("%s-Peer", nats.ExpectedLastSubjSeqHdr), expHdr)
-				nmsg.Header = hdrs
-			}
-		*/
+		hdrs := msg.Headers()
+		if len(hdrs) > 0 {
+			// Delete the expected last sequence header since that will result in
+			// the local server enforcing it which would not work for the first message
+			// of each individual subject (since there is no existing history). Instead,
+			// for posterity, we'll store it in a separate header suffixed with -Peer.
+			expHdr := hdrs.Get(nats.ExpectedLastSubjSeqHdr)
+			hdrs.Del(nats.ExpectedLastSubjSeqHdr)
+			hdrs.Set(fmt.Sprintf("%s-Peer", nats.ExpectedLastSubjSeqHdr), expHdr)
+			nmsg.Header = hdrs
+		}
 
 		pa, err := m.ljs.PublishMsg(ctx, nmsg)
 		if err != nil {
@@ -372,7 +370,6 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 
 		numRemaining--
 		if numRemaining == 0 {
-			m.Logger.Debugf("caught up with peer")
 			m.Logger.Infof("stream caught-up: %d messages in %s", numPending, time.Since(t0))
 			done <- nil
 		}
@@ -631,7 +628,7 @@ func (m *Manager) KeyValue(write bool) *KeyValue {
 
 	// Leader always points to local.
 	// Writes point to leader otherwise local replica for reads.
-	if m.isLeader || !write {
+	if m.isLeader { //|| !write {
 		kv = m.lkkv
 	} else {
 		kv = m.pkkv
