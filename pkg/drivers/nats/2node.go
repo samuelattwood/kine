@@ -134,7 +134,7 @@ func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (je
 	}
 
 	m.lkv = kv
-	m.lkkv = NewKeyValue(ctx, "local", m.lkv, m.ljs)
+	m.lkkv = NewKeyValue(ctx, "local", m.lkv, m.ljs, int(m.KVConfig.History))
 	return m.ljs.Stream(ctx, fmt.Sprintf("KV_%s", m.KVConfig.Bucket))
 }
 
@@ -247,7 +247,7 @@ func (m *Manager) startPeer(ctx context.Context) {
 	m.pnc = nc
 	m.pjs = js
 	m.pkv = kv
-	m.pkkv = NewKeyValue(ctx, "peer", kv, js)
+	m.pkkv = NewKeyValue(ctx, "peer", kv, js, int(m.KVConfig.History))
 
 	m.Logger.Infof("init-peer: connected to peer: %s", m.PeerURL)
 }
@@ -628,7 +628,7 @@ func (m *Manager) KeyValue(write bool) *KeyValue {
 
 	// Leader always points to local.
 	// Writes point to leader otherwise local replica for reads.
-	if m.isLeader { //|| !write {
+	if m.isLeader || !write {
 		kv = m.lkkv
 	} else {
 		kv = m.pkkv
