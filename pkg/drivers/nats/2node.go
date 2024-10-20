@@ -94,7 +94,7 @@ func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (je
 	}
 
 	// Ensure references are setup.
-	if del && !exists {
+	if del && exists {
 		err := m.ljs.DeleteKeyValue(ctx, m.KVConfig.Bucket)
 		if err != nil {
 			m.Logger.Errorf("init-local: failed to delete bucket %s: %s", m.KVConfig.Bucket, err)
