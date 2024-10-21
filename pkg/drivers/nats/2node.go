@@ -395,6 +395,8 @@ func (m *Manager) stopPeer() {
 		return
 	}
 
+	m.pkkv.Stop()
+	m.pkkv = nil
 	m.pnc.Drain()
 	for m.pnc.IsDraining() {
 		time.Sleep(10 * time.Millisecond)
@@ -402,8 +404,6 @@ func (m *Manager) stopPeer() {
 	m.pnc = nil
 	m.pjs = nil
 	m.pkv = nil
-	m.pkkv.Stop()
-	m.pkkv = nil
 }
 
 func (m *Manager) stopLocal() {
@@ -411,6 +411,8 @@ func (m *Manager) stopLocal() {
 		return
 	}
 
+	m.lkkv.Stop()
+	m.lkkv = nil
 	m.lnc.Drain()
 	for m.lnc.IsDraining() {
 		time.Sleep(10 * time.Millisecond)
@@ -418,8 +420,6 @@ func (m *Manager) stopLocal() {
 	m.lnc = nil
 	m.ljs = nil
 	m.lkv = nil
-	m.lkkv.Stop()
-	m.lkkv = nil
 }
 
 func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.LeadershipKVState, tch <-chan keys.TransitioningKVState) {
@@ -469,6 +469,8 @@ func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.Leader
 			if !ts.State {
 				break
 			}
+
+			m.Logger.Infof("transitioning state change: %v", ts.State)
 
 			m.tne.DoneTransitioning(ts.Leadership)
 		}
