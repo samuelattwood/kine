@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sirupsen/logrus"
 	"github.com/tidwall/btree"
@@ -274,9 +275,9 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyW
 	}
 	cfg.DeliverPolicy = dp
 
-	con, err := e.js.OrderedConsumer(context.Background(), fmt.Sprintf("KV_%s", e.nkv.Bucket()), cfg)
+	con, err := e.js.OrderedConsumer(ctx, fmt.Sprintf("KV_%s", e.nkv.Bucket()), cfg)
 	if err != nil {
-		return nil, fmt.Errorf("creating ordered consumer: %s", err)
+		return nil, fmt.Errorf("watch: creating ordered consumer: %s", err)
 	}
 
 	errch := make(chan error, 1)
@@ -287,7 +288,7 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyW
 		}),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("starting consuming: %s", err)
+		return nil, fmt.Errorf("watch: starting consuming: %s", err)
 	}
 
 	w := &streamWatcher{
@@ -538,6 +539,9 @@ func NewKeyValue(ctx context.Context, name string, bucket jetstream.KeyValue, js
 	go func() {
 		for {
 			err := kv.btreeWatcher(ctx, hsize)
+			if errors.Is(err, nats.ErrConnectionClosed) {
+				return
+			}
 			logrus.Debugf("%s: btree watcher: %v", name, err)
 			jitterSleep(time.Second)
 		}

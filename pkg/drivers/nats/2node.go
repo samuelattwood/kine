@@ -140,6 +140,8 @@ func (m *Manager) initLocalBucket(ctx context.Context, seq uint64, del bool) (je
 
 // startLocal initializes the local connection and ensures the key-value bucket exists.
 func (m *Manager) startLocal(ctx context.Context) error {
+	m.stopLocal()
+
 	opts := append([]nats.Option{}, m.LocalOpts...)
 	opts = append(opts,
 		nats.MaxReconnects(-1),
@@ -287,7 +289,7 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 	// Indicates when we have caught up with the peer.
 	numPending := con.CachedInfo().NumPending
 	numRemaining := numPending
-	var t0 time.Time
+	t0 := time.Now()
 
 	// Keep track of the last sequence number that was published.
 	seq := uint64(0)
@@ -377,7 +379,7 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 
 	cctx, err := con.Consume(msgHandler, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
 		// TODO: handle error?
-		m.Logger.Warnf("replication consumer error: %s", err)
+		m.Logger.Warnf("replication consumer error @ seq %d: %s", seq, err)
 	}))
 	if err != nil {
 		done <- fmt.Errorf("failed to start replication consumer: %w", err)
@@ -441,6 +443,10 @@ func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.Leader
 			case keys.Follower, keys.Impaired:
 				if m.isLeader {
 					m.isLeader = false
+					// This ensures the connection and all in-flight messages are drained before
+					// switching to the follower state. Specifically, any outstanding writes that
+					// are in-flight will be completed before the follower state is assumed.
+					m.startLocal(m.ctx)
 					m.startPeer(m.ctx)
 
 					done := make(chan error)

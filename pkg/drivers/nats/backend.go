@@ -111,13 +111,19 @@ func (b *Backend) get(ctx context.Context, key string, revision int64, allowDele
 // See https://github.com/kubernetes/kubernetes/blob/442a69c3bdf6fe8e525b05887e57d89db1e2f3a5/staging/src/k8s.io/apiserver/pkg/storage/storagebackend/factory/etcd3.go#L97
 func (b *Backend) Start(ctx context.Context) error {
 	b.l.Infof("Creating health key...")
-	if _, err := b.Create(ctx, "/registry/health", []byte(`{"health":"true"}`), 0); err != nil {
-		if err != server.ErrKeyExists {
-			b.l.Errorf("Failed to create health check key: %v", err)
-		}
+
+	rev, err := b.Create(ctx, "/registry/health", []byte(`{"health":"true"}`), 0)
+	if err == nil {
+		return nil
 	}
-	b.l.Infof("Created health key...")
-	return nil
+
+	// Already exists, perform an update to increment the revision.
+	if err == server.ErrKeyExists {
+		_, _, _, err = b.Update(ctx, "/registry/health", []byte(`{"health":"true"}`), rev, 0)
+		return err
+	}
+
+	return err
 }
 
 // DbSize get the kineBucket size from JetStream.
@@ -382,12 +388,12 @@ func (b *Backend) Watch(ctx context.Context, prefix string, startRevision int64)
 				if err == nil || errors.Is(err, context.Canceled) {
 					return
 				}
-				b.l.Warnf("watch ctx: prefix=%s, err=%s", prefix, err)
+				b.l.Debugf("watch ctx: prefix=%s, err=%s", prefix, err)
 				w.Stop()
 				goto outer
 
 			case err := <-w.Err():
-				b.l.Warnf("watch error: prefix=%s, err=%s", prefix, err)
+				b.l.Debugf("watch error: prefix=%s, err=%s", prefix, err)
 				w.Stop()
 				goto outer
 
@@ -403,7 +409,7 @@ func (b *Backend) Watch(ctx context.Context, prefix string, startRevision int64)
 				var nd natsData
 				err := nd.Decode(e)
 				if err != nil {
-					b.l.Warnf("watch decode: key=%s, err=%s", key, err)
+					b.l.Debugf("watch decode: key=%s, err=%s", key, err)
 					continue
 				}
 
