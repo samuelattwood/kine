@@ -15,6 +15,10 @@ import (
 	"github.com/tidwall/btree"
 )
 
+var (
+	errStopKeyValue = errors.New("stopping key value")
+)
+
 type entry struct {
 	kc    *keyCodec
 	vc    *valueCodec
@@ -120,7 +124,7 @@ type KeyValue struct {
 	btm     sync.RWMutex
 	lastSeq uint64
 	ctx     context.Context
-	cancel  context.CancelFunc
+	cancel  context.CancelCauseFunc
 }
 
 func (e *KeyValue) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
@@ -519,12 +523,12 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 }
 
 func (e *KeyValue) Stop() {
-	e.cancel()
+	e.cancel(errStopKeyValue)
 	<-e.ctx.Done()
 }
 
 func NewKeyValue(ctx context.Context, name string, bucket jetstream.KeyValue, js jetstream.JetStream, hsize int) *KeyValue {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 
 	kv := &KeyValue{
 		name:   name,
@@ -539,11 +543,30 @@ func NewKeyValue(ctx context.Context, name string, bucket jetstream.KeyValue, js
 
 	go func() {
 		for {
-			err := kv.btreeWatcher(ctx, hsize)
+			errch := make(chan error, 1)
+
+			go func() {
+				errch <- kv.btreeWatcher(ctx, hsize)
+			}()
+
+			var err error
+			select {
+			case err = <-errch:
+
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
+
 			logrus.Debugf("%s: btree watcher: %v", name, err)
+
+			if errors.Is(err, errStopKeyValue) {
+				return
+			}
+
 			if errors.Is(err, nats.ErrConnectionClosed) {
 				return
 			}
+
 			jitterSleep(time.Second)
 		}
 	}()
