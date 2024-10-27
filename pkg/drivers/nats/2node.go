@@ -434,32 +434,28 @@ func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.Leader
 
 			switch ls.State {
 			case keys.Leader, keys.LeaderRX:
-				if !m.isLeader {
-					m.isLeader = true
-					m.stopStreamReplication()
-					m.stopPeer()
-				}
+				m.isLeader = true
+				m.stopStreamReplication()
+				m.stopPeer()
 
 			case keys.Follower, keys.Impaired:
-				if m.isLeader {
-					m.isLeader = false
-					// This ensures the connection and all in-flight messages are drained before
-					// switching to the follower state. Specifically, any outstanding writes that
-					// are in-flight will be completed before the follower state is assumed.
-					m.startLocal(m.ctx)
-					m.startPeer(m.ctx)
+				m.isLeader = false
+				// This ensures the connection and all in-flight messages are drained before
+				// switching to the follower state. Specifically, any outstanding writes that
+				// are in-flight will be completed before the follower state is assumed.
+				m.startLocal(m.ctx)
+				m.startPeer(m.ctx)
 
-					done := make(chan error)
-					go m.startStreamReplication(ctx, done)
-					select {
-					case err := <-done:
-						if err != nil {
-							m.Logger.Warnf("failed to start stream replication: %s", err)
-						}
-						// TODO: make configurable?
-					case <-time.After(3 * time.Second):
-						m.Logger.Warnf("timed out waiting for stream replication to start")
+				done := make(chan error)
+				go m.startStreamReplication(ctx, done)
+				select {
+				case err := <-done:
+					if err != nil {
+						m.Logger.Warnf("failed to start stream replication: %s", err)
 					}
+					// TODO: make configurable?
+				case <-time.After(3 * time.Second):
+					m.Logger.Warnf("timed out waiting for stream replication to start")
 				}
 			}
 
