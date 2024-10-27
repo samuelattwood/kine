@@ -554,7 +554,7 @@ func NewKeyValue(ctx context.Context, name string, bucket jetstream.KeyValue, js
 			case err = <-errch:
 
 			case <-ctx.Done():
-				err = ctx.Err()
+				err = context.Cause(ctx)
 			}
 
 			logrus.Debugf("%s: btree watcher: %v", name, err)
