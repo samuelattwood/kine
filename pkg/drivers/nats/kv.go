@@ -325,9 +325,10 @@ func (e *KeyValue) btreeWatcher(ctx context.Context, hsize int) error {
 	br := e.BucketRevision()
 
 	logrus.Debugf("%s: btree watcher: starting at %d", e.name, br)
+	t0 := time.Now()
 	w, err := e.Watch(ctx, "/", br)
 	if err != nil {
-		return fmt.Errorf("init: %s", err)
+		return fmt.Errorf("init: %s after %s", err, time.Since(t0))
 	}
 	defer w.Stop()
 
@@ -539,10 +540,10 @@ func NewKeyValue(ctx context.Context, name string, bucket jetstream.KeyValue, js
 	go func() {
 		for {
 			err := kv.btreeWatcher(ctx, hsize)
+			logrus.Debugf("%s: btree watcher: %v", name, err)
 			if errors.Is(err, nats.ErrConnectionClosed) {
 				return
 			}
-			logrus.Debugf("%s: btree watcher: %v", name, err)
 			jitterSleep(time.Second)
 		}
 	}()
