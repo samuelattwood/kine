@@ -252,6 +252,18 @@ func (m *Manager) startPeer(ctx context.Context) {
 	m.pkkv = NewKeyValue(ctx, "peer", kv, js, int(m.KVConfig.History))
 
 	m.Logger.Infof("init-peer: connected to peer: %s", m.PeerURL)
+
+	done := make(chan error)
+	go m.startStreamReplication(ctx, done)
+	select {
+	case err := <-done:
+		if err != nil {
+			m.Logger.Warnf("failed to start stream replication: %s", err)
+		}
+		// TODO: make configurable?
+	case <-time.After(3 * time.Second):
+		m.Logger.Warnf("timed out waiting for stream replication to start")
+	}
 }
 
 // getLocalLastSeq returns the last sequence number for the local bucket.
@@ -396,6 +408,8 @@ func (m *Manager) stopPeer() {
 		return
 	}
 
+	m.stopStreamReplication()
+
 	m.pkkv.Stop()
 	m.pkkv = nil
 	m.pnc.Drain()
@@ -426,6 +440,9 @@ func (m *Manager) stopLocal() {
 func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.LeadershipKVState, tch <-chan keys.TransitioningKVState) {
 	for {
 		select {
+		case <-ctx.Done():
+			return
+
 		case ls := <-lch:
 			m.Logger.Infof("leadership state change: %v", ls.State)
 
@@ -435,25 +452,12 @@ func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.Leader
 			switch ls.State {
 			case keys.Leader, keys.LeaderRX:
 				m.isLeader = true
-				m.stopStreamReplication()
 				m.stopPeer()
 
 			case keys.Follower, keys.Impaired:
 				m.isLeader = false
 				//m.startLocal(m.ctx)
 				m.startPeer(m.ctx)
-
-				done := make(chan error)
-				go m.startStreamReplication(ctx, done)
-				select {
-				case err := <-done:
-					if err != nil {
-						m.Logger.Warnf("failed to start stream replication: %s", err)
-					}
-					// TODO: make configurable?
-				case <-time.After(3 * time.Second):
-					m.Logger.Warnf("timed out waiting for stream replication to start")
-				}
 			}
 
 			m.leadershipState = ls.State
@@ -551,6 +555,7 @@ func (m *Manager) Init(ctx context.Context) error {
 	if m.isLeader {
 		m.Logger.Infof("init: starting as leader")
 	} else {
+		m.startPeer(cctx)
 		m.Logger.Infof("init: starting as follower")
 	}
 
@@ -597,7 +602,6 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.stopStreamReplication()
 	m.stopPeer()
 	m.stopLocal()
 	m.tne.Stop(ctx)
