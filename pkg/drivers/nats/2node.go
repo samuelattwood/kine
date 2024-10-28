@@ -362,7 +362,8 @@ func (m *Manager) startStreamReplication(ctx context.Context, done chan error) {
 
 		pa, err := m.ljs.PublishMsg(ctx, nmsg)
 		if err != nil {
-			m.Logger.Warnf("failed to publish local message: %s", err)
+			//m.Logger.Warnf("failed to publish local message: %s", err)
+			panic(fmt.Sprintf("failed to publish local message: %s", err))
 		}
 
 		seq = pa.Sequence
@@ -430,8 +431,7 @@ func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.Leader
 
 			m.mu.Lock()
 
-			m.leadershipState = ls.State
-
+			// The state the node is transitioning to.
 			switch ls.State {
 			case keys.Leader, keys.LeaderRX:
 				m.isLeader = true
@@ -440,10 +440,7 @@ func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.Leader
 
 			case keys.Follower, keys.Impaired:
 				m.isLeader = false
-				// This ensures the connection and all in-flight messages are drained before
-				// switching to the follower state. Specifically, any outstanding writes that
-				// are in-flight will be completed before the follower state is assumed.
-				m.startLocal(m.ctx)
+				//m.startLocal(m.ctx)
 				m.startPeer(m.ctx)
 
 				done := make(chan error)
@@ -458,6 +455,8 @@ func (m *Manager) handleStateChanges(ctx context.Context, lch <-chan keys.Leader
 					m.Logger.Warnf("timed out waiting for stream replication to start")
 				}
 			}
+
+			m.leadershipState = ls.State
 
 			m.mu.Unlock()
 
@@ -549,6 +548,12 @@ func (m *Manager) Init(ctx context.Context) error {
 	}
 	m.Logger.Infof("local initialized")
 
+	if m.isLeader {
+		m.Logger.Infof("init: starting as leader")
+	} else {
+		m.Logger.Infof("init: starting as follower")
+	}
+
 	errch := make(chan error, 1)
 
 	// Setup tne watchers.
@@ -567,32 +572,6 @@ func (m *Manager) Init(ctx context.Context) error {
 	}()
 
 	go m.handleStateChanges(ctx, lch, tch)
-
-	// Attempt to initialize the peer in the background if we are the leader.
-	// Otherwise, initialize the peer in the foreground and start stream replication.
-	if m.isLeader {
-		m.Logger.Infof("init: starting as leader")
-		//go m.initPeer(cctx, true)
-		//m.Logger.Infof("init-peer: initialization started in background")
-	} else {
-		m.Logger.Infof("init: starting as follower")
-		m.mu.Lock()
-		m.startPeer(cctx)
-		m.mu.Unlock()
-		m.Logger.Infof("init-peer: initialization started")
-
-		// Used to signal when the catchup is complete.
-		done := make(chan error)
-		go m.startStreamReplication(ctx, done)
-		select {
-		case err := <-done:
-			if err != nil {
-				m.Logger.Warnf("init: failed to start stream replication: %s", err)
-			}
-		case <-time.After(3 * time.Second):
-			m.Logger.Warnf("init: timed out waiting for stream replication to start")
-		}
-	}
 
 	sigch := make(chan os.Signal, 1)
 	signal.Notify(sigch, os.Interrupt)
