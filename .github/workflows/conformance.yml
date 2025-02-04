@@ -1,0 +1,75 @@
+name: Conformance
+on:
+  push:
+    branches:
+      - main
+      - ci
+
+  pull_request:
+    branches: main
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Setup Docker
+        uses: docker/setup-docker-action@v4
+
+      - name: Checkout k3s
+        uses: actions/checkout@v4
+        with:
+          repository: k3s-io/k3s
+          path: k3s
+          fetch-depth: 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: k3s/kine
+
+      - name: Use local kine
+        run: |
+          go mod edit -replace=github.com/k3s-io/kine=./kine
+
+          cp kine/scripts/test-setup-sonobuoy-nats tests/docker/
+          cp kine/scripts/k3s-test scripts/test
+
+          # sed -i "101i test-run-sonobuoy nats serial" scripts/test
+          # sed -i "102i echo \"Did test-run-sonobuoy-nats serial $?\"" scripts/test
+
+          # sed -i "103i test-run-sonobuoy nats parallel" scripts/test
+          # sed -i "104i echo \"Did test-run-sonobuoy-nats parallel $?\"" scripts/test
+        working-directory: ./k3s
+
+      - name: Build k3s Image
+        run: |
+          make .dapper
+
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          ARCH="amd64"
+          TAG_PREFIX="local-test"
+
+          ./.dapper ci
+        working-directory: ./k3s
+
+      - name: Build Test Image
+        uses: docker/build-push-action@v6
+        with:
+          context: k3s
+          file: k3s/Dockerfile.test
+          target: test-k3s
+          tags: k3s:conformance
+          push: false
+
+      - name: Run Test Image
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /tmp:/tmp \
+            --privileged \
+            --network host \
+            k3s:conformance
