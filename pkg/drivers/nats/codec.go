@@ -10,9 +10,7 @@ import (
 	"github.com/shengdoushi/base58"
 )
 
-var (
-	keyAlphabet = base58.BitcoinAlphabet
-)
+var keyAlphabet = base58.BitcoinAlphabet
 
 // keyCodec turns keys like /this/is/a.test.key into Base58 encoded values
 // split on `.` This is because NATS keys are split on . rather than /.

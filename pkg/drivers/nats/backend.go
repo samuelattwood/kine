@@ -44,10 +44,8 @@ func (d *natsData) Decode(e jetstream.KeyValueEntry) error {
 	return nil
 }
 
-var (
-	// Ensure Backend implements server.Backend.
-	_ server.Backend = (&Backend{})
-)
+// Ensure Backend implements server.Backend.
+var _ server.Backend = (&Backend{})
 
 type Backend struct {
 	nc     *nats.Conn
@@ -258,7 +256,9 @@ func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64
 	if err != nil {
 		if jsWrongLastSeqErr.Is(err) {
 			b.l.Warnf("delete conflict: key=%s, rev=%d, err=%s", key, rev, err)
-			return 0, nil, false, nil
+
+			rev, pnd, err := b.get(ctx, key, 0, false)
+			return rev, pnd.KV, false, err
 		}
 		return rev, value.KV, false, nil
 	}
@@ -322,7 +322,9 @@ func (b *Backend) Update(ctx context.Context, key string, value []byte, revision
 		// This may occur if a concurrent writer created the key.
 		if jsWrongLastSeqErr.Is(err) {
 			b.l.Warnf("update conflict: key=%s, rev=%d, err=%s", key, revision, err)
-			return 0, nil, false, nil
+
+			rev, pnd, err := b.get(ctx, key, 0, false)
+			return rev, pnd.KV, false, err
 		}
 		return 0, nil, false, err
 	}
