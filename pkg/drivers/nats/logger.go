@@ -8,9 +8,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var (
-	_ server.Backend = &BackendLogger{}
-)
+var _ server.Backend = &BackendLogger{}
 
 type BackendLogger struct {
 	logger    *logrus.Logger

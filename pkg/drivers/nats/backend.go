@@ -258,7 +258,13 @@ func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64
 			b.l.Warnf("delete conflict: key=%s, rev=%d, err=%s", key, rev, err)
 
 			rev, pnd, err := b.get(ctx, key, 0, false)
-			return rev, pnd.KV, false, err
+
+			var kv *server.KeyValue
+			if pnd != nil {
+				kv = pnd.KV
+			}
+
+			return rev, kv, false, err
 		}
 		return rev, value.KV, false, nil
 	}
@@ -324,7 +330,13 @@ func (b *Backend) Update(ctx context.Context, key string, value []byte, revision
 			b.l.Warnf("update conflict: key=%s, rev=%d, err=%s", key, revision, err)
 
 			rev, pnd, err := b.get(ctx, key, 0, false)
-			return rev, pnd.KV, false, err
+
+			var kv *server.KeyValue
+			if pnd != nil {
+				kv = pnd.KV
+			}
+
+			return rev, kv, false, err
 		}
 		return 0, nil, false, err
 	}

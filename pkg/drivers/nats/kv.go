@@ -380,8 +380,6 @@ type keySeq struct {
 func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision int64) (int64, error) {
 	seekKey := prefix
 
-	logrus.Infof("Count | Prefix: %s Start: %s Revision: %d", prefix, startKey, revision)
-
 	if startKey != "" {
 		startKey = strings.TrimPrefix(startKey, prefix)
 		startKey = strings.TrimPrefix(startKey, "/")
@@ -389,8 +387,6 @@ func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision 
 		seekKey = strings.TrimSuffix(seekKey, "/")
 		seekKey = fmt.Sprintf("%s/%s", seekKey, startKey)
 	}
-
-	logrus.Infof("Count | SeekKey: %s", seekKey)
 
 	it := e.bt.Iter()
 	if seekKey != "" {
@@ -443,15 +439,11 @@ func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision 
 	}
 	e.btm.RUnlock()
 
-	logrus.Infof("Count: %d", count)
-
 	return count, nil
 }
 
 func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, revision int64) ([]jetstream.KeyValueEntry, error) {
 	seekKey := prefix
-
-	logrus.Infof("List | Prefix: %s Start: %s Limit: %d", prefix, startKey, limit)
 
 	if startKey != "" {
 		startKey = strings.TrimPrefix(startKey, prefix)
@@ -460,8 +452,6 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 		seekKey = strings.TrimSuffix(seekKey, "/")
 		seekKey = fmt.Sprintf("%s/%s", seekKey, startKey)
 	}
-
-	logrus.Infof("List | SeekKey: %s", seekKey)
 
 	it := e.bt.Iter()
 	if seekKey != "" {
@@ -474,47 +464,10 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 		it.Next()
 	}
 
-	e.btm.RLock()
-
-	/**
-
-	for {
-		entry, err := e.Get(ctx, it.Key())
-		if err != nil {
-			e.btm.RUnlock()
-			return nil, err
-		}
-
-		var val natsData
-		err = val.Decode(entry)
-		if err != nil {
-			e.btm.RUnlock()
-			return nil, err
-		}
-
-		if val.KV.Lease != 0 && time.Now().After(val.CreateTime.Add(time.Second*time.Duration(val.KV.Lease))) {
-			logrus.Warnf("Expired Key: %s", it.Key())
-			v := it.Value()
-			err = e.Delete(ctx, val.KV.Key, jetstream.LastRevision(uint64(v[len(v)-1].seq)))
-			if err != nil {
-				e.btm.RUnlock()
-				return nil, err
-			}
-		} else {
-			break
-		}
-
-		if !it.Next() {
-			e.btm.RUnlock()
-			return nil, nil
-		}
-	}
-
-	**/
-
 	var matches []*keySeq
 	now := time.Now()
 
+	e.btm.RLock()
 	for {
 		if limit > 0 && len(matches) == int(limit) {
 			break
@@ -556,7 +509,7 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 	}
 	e.btm.RUnlock()
 
-	logrus.Infof("kv: list: got %d matches from btree", len(matches))
+	logrus.Debugf("kv: list: got %d matches from btree", len(matches))
 
 	var entries []jetstream.KeyValueEntry
 	for _, m := range matches {
