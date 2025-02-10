@@ -15,9 +15,7 @@ import (
 	"github.com/tidwall/btree"
 )
 
-var (
-	errStopKeyValue = errors.New("stopping key value")
-)
+var errStopKeyValue = errors.New("stopping key value")
 
 type entry struct {
 	kc    *keyCodec
@@ -278,6 +276,7 @@ func (e *KeyValue) Watch(ctx context.Context, keys string, startRev int64) (KeyW
 		cfg.OptStartSeq = uint64(startRev)
 	}
 	cfg.DeliverPolicy = dp
+	cfg.FilterSubjects = append(cfg.FilterSubjects, filter)
 
 	con, err := e.js.OrderedConsumer(ctx, fmt.Sprintf("KV_%s", e.nkv.Bucket()), cfg)
 	if err != nil {
@@ -391,7 +390,11 @@ type keySeq struct {
 
 func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision int64) (int64, error) {
 	seekKey := prefix
+
 	if startKey != "" {
+		startKey = strings.TrimPrefix(startKey, prefix)
+		startKey = strings.TrimPrefix(startKey, "/")
+
 		seekKey = strings.TrimSuffix(seekKey, "/")
 		seekKey = fmt.Sprintf("%s/%s", seekKey, startKey)
 	}
@@ -401,6 +404,10 @@ func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision 
 		if ok := it.Seek(seekKey); !ok {
 			return 0, nil
 		}
+	}
+
+	if startKey != "" {
+		it.Next()
 	}
 
 	var count int64
@@ -448,7 +455,11 @@ func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision 
 
 func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, revision int64) ([]jetstream.KeyValueEntry, error) {
 	seekKey := prefix
+
 	if startKey != "" {
+		startKey = strings.TrimPrefix(startKey, prefix)
+		startKey = strings.TrimPrefix(startKey, "/")
+
 		seekKey = strings.TrimSuffix(seekKey, "/")
 		seekKey = fmt.Sprintf("%s/%s", seekKey, startKey)
 	}
@@ -460,11 +471,14 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 		}
 	}
 
+	if startKey != "" {
+		it.Next()
+	}
+
 	var matches []*keySeq
 	now := time.Now()
 
 	e.btm.RLock()
-
 	for {
 		if limit > 0 && len(matches) == int(limit) {
 			break

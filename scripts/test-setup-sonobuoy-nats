@@ -1,0 +1,37 @@
+#!/bin/bash
+
+. ./tests/docker/test-setup-sonobuoy
+
+cluster-pre-hook() {
+  mkdir -p $TEST_DIR/db/$LABEL_SUFFIX/metadata
+  local testID=$(basename $TEST_DIR)
+  local name=$(echo ${LABEL_SUFFIX}-${testID,,} | tee $TEST_DIR/db/$LABEL_SUFFIX/metadata/name)
+
+  docker run --name $name \
+    -d nats:latest --js -m 8222 \
+    >/dev/null
+
+  local ip=$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' $name | tee $TEST_DIR/db/$LABEL_SUFFIX/metadata/ip)
+
+
+  while [[ $(curl -s $ip:8222/healthz | jq -r '.status') != "ok" ]]; do
+    sleep 2
+  done
+
+  export SERVER_ARGS="${SERVER_ARGS}
+    --datastore-endpoint=nats://${ip}:4222
+  "
+}
+export -f cluster-pre-hook
+
+test-post-hook() {
+  if [[ $1 -eq 0 ]] || [[ ! -f "$TEST_DIR/sonobuoy/plugins/e2e/results/global/e2e.log" ]]; then
+    return $1
+  fi
+  local failures=$(awk '/^Summarizing .* Failures?:$/,0' "$TEST_DIR/sonobuoy/plugins/e2e/results/global/e2e.log")
+  # Ignore sonobuoy failures if only these flaky tests have failed
+  flakyFails=$( grep -scF -f ./tests/docker/flaky-tests <<< "$failures" )
+  totalFails=$( grep -scF -e "[Fail]" <<< "$failures" )
+  [ "$totalFails" -le "$flakyFails" ]
+}
+export -f test-post-hook

@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/k3s-io/kine/pkg/drivers"
 	"github.com/k3s-io/kine/pkg/drivers/generic"
@@ -55,7 +54,7 @@ func NewVariant(ctx context.Context, driverName string, cfg *drivers.Config) (se
 		if err := os.MkdirAll("./db", 0700); err != nil {
 			return nil, nil, err
 		}
-		dataSourceName = "./db/state.db?_journal=WAL&cache=shared&_busy_timeout=30000"
+		dataSourceName = "./db/state.db?_journal=WAL&cache=shared&_busy_timeout=30000&_txlock=immediate"
 	}
 
 	dialect, err := generic.Open(ctx, driverName, dataSourceName, cfg.ConnectionPoolConfig, "?", false, cfg.MetricsRegisterer)
@@ -99,22 +98,7 @@ func NewVariant(ctx context.Context, driverName string, cfg *drivers.Config) (se
 		return err.Error()
 	}
 
-	// this is the first SQL that will be executed on a new DB conn so
-	// loop on failure here because in the case of dqlite it could still be initializing
-	for i := 0; i < 300; i++ {
-		err = setup(dialect.DB)
-		if err == nil {
-			break
-		}
-		logrus.Errorf("failed to setup db: %v", err)
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		case <-time.After(time.Second):
-		}
-		time.Sleep(time.Second)
-	}
-	if err != nil {
+	if err := setup(dialect.DB); err != nil {
 		return nil, nil, errors.Wrap(err, "setup db")
 	}
 

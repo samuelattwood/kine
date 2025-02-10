@@ -44,10 +44,8 @@ func (d *natsData) Decode(e jetstream.KeyValueEntry) error {
 	return nil
 }
 
-var (
-	// Ensure Backend implements server.Backend.
-	_ server.Backend = (&Backend{})
-)
+// Ensure Backend implements server.Backend.
+var _ server.Backend = (&Backend{})
 
 type Backend struct {
 	kv func(bool) *KeyValue
@@ -259,8 +257,16 @@ func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64
 	drev, err := b.kv(true).Update(ctx, key, data, uint64(rev))
 	if err != nil {
 		if jsWrongLastSeqErr.Is(err) {
-			b.l.Debugf("delete conflict: key=%s, rev=%d, err=%s", key, rev, err)
-			return 0, nil, false, nil
+			b.l.Warnf("delete conflict: key=%s, rev=%d, err=%s", key, rev, err)
+
+			rev, pnd, err := b.get(ctx, key, 0, false)
+
+			var kv *server.KeyValue
+			if pnd != nil {
+				kv = pnd.KV
+			}
+
+			return rev, kv, false, err
 		}
 		return rev, pnv.KV, false, nil
 	}
@@ -323,8 +329,16 @@ func (b *Backend) Update(ctx context.Context, key string, value []byte, revision
 	if err != nil {
 		// This may occur if a concurrent writer created the key.
 		if jsWrongLastSeqErr.Is(err) {
-			b.l.Debugf("update conflict: key=%s, rev=%d, err=%s", key, revision, err)
-			return 0, nil, false, nil
+			b.l.Warnf("update conflict: key=%s, rev=%d, err=%s", key, revision, err)
+
+			rev, pnd, err := b.get(ctx, key, 0, false)
+
+			var kv *server.KeyValue
+			if pnd != nil {
+				kv = pnd.KV
+			}
+
+			return rev, kv, false, err
 		}
 		return 0, nil, false, err
 	}

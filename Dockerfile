@@ -1,5 +1,5 @@
 
-FROM golang:1.22-alpine3.20 AS infra
+FROM golang:1.23-alpine3.20 AS infra
 ARG ARCH=amd64
 
 RUN apk -U add bash coreutils git gcc musl-dev vim less curl wget ca-certificates
@@ -15,7 +15,7 @@ ENV SRC_DIR=/go/src/github.com/k3s-io/kine
 WORKDIR ${SRC_DIR}/
 
 # Validate needs everything in the project, so we separate it out for better caching
-FROM infra as validate
+FROM infra AS validate
 ARG SKIP_VALIDATE
 ENV SKIP_VALIDATE=${SKIP_VALIDATE}
 COPY . .
@@ -41,6 +41,6 @@ RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
     --mount=type=cache,id=gobuild,target=/root/.cache/go-build \
     ./scripts/build
 
-FROM scratch as binary
+FROM scratch AS binary
 ENV SRC_DIR=/go/src/github.com/k3s-io/kine
 COPY --from=build ${SRC_DIR}/bin /bin

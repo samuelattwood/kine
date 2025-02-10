@@ -325,29 +325,18 @@ func (l *LogStructured) handleTTLEvents(ctx context.Context, rwMutex *sync.RWMut
 		return true
 	}
 
-	l.deleteTTLEvent(ctx, rwMutex, queue, store, eventKV)
-	return true
-}
-
-func (l *LogStructured) deleteTTLEvent(ctx context.Context, rwMutex *sync.RWMutex, queue workqueue.DelayingInterface, store map[string]*ttlEventKV, preEventKV *ttlEventKV) {
-	logrus.Tracef("TTL delete key=%v, modRev=%v", preEventKV.key, preEventKV.modRevision)
-	_, _, _, err := l.Delete(ctx, preEventKV.key, preEventKV.modRevision)
+	logrus.Tracef("TTL delete key=%v, modRev=%v", eventKV.key, eventKV.modRevision)
+	if _, _, _, err := l.Delete(ctx, eventKV.key, eventKV.modRevision); err != nil {
+		logrus.Errorf("TTL delete trigger failed for key=%v: %v, requeuing", eventKV.key, err)
+		queue.AddAfter(eventKV.key, retryInterval)
+		return true
+	}
 
 	rwMutex.Lock()
 	defer rwMutex.Unlock()
-	curEventKV := store[preEventKV.key]
-	if expires := time.Until(preEventKV.expiredAt); expires > 0 {
-		logrus.Tracef("TTL changed for key=%v, ttl=%v, requeuing", curEventKV.key, expires)
-		queue.AddAfter(curEventKV.key, expires)
-		return
-	}
-	if err != nil {
-		logrus.Errorf("TTL delete trigger failed for key=%v: %v, requeuing", curEventKV.key, err)
-		queue.AddAfter(curEventKV.key, retryInterval)
-		return
-	}
+	delete(store, eventKV.key)
 
-	delete(store, curEventKV.key)
+	return true
 }
 
 // ttlEvents starts a goroutine to do a ListWatch on the root prefix. First it lists
@@ -425,17 +414,20 @@ func (l *LogStructured) Watch(ctx context.Context, prefix string, revision int64
 	}
 
 	result := make(chan []*server.Event, 100)
-	wr := server.WatchResult{Events: result}
+	errc := make(chan error, 1)
+	wr := server.WatchResult{Events: result, Errorc: errc}
 
 	rev, kvs, err := l.log.After(ctx, prefix, revision, 0)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			logrus.Errorf("Failed to list %s for revision %d: %v", prefix, revision, err)
-		}
-		if err == server.ErrCompacted {
-			compact, _ := l.log.CompactRevision(ctx)
-			wr.CompactRevision = compact
-			wr.CurrentRevision = rev
+			if err == server.ErrCompacted {
+				compact, _ := l.log.CompactRevision(ctx)
+				wr.CompactRevision = compact
+				wr.CurrentRevision = rev
+			} else {
+				errc <- server.ErrGRPCUnhealthy
+			}
 		}
 		cancel()
 	}

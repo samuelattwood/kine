@@ -54,7 +54,6 @@ func New(ctx context.Context, cfg *drivers.Config) (bool, server.Backend, error)
 func NewLegacy(ctx context.Context, cfg *drivers.Config) (bool, server.Backend, error) {
 	backend, err := newBackend(ctx, cfg.DataSourceName, cfg.BackendTLSConfig, true)
 	return true, backend, err
-
 }
 
 func newBackend(ctx context.Context, connection string, tlsInfo tls.Config, legacy bool) (server.Backend, error) {
