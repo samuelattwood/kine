@@ -353,7 +353,7 @@ func (b *Backend) Update(ctx context.Context, key string, value []byte, revision
 // If limit is provided, the maximum set of matches is limited.
 // If revision is provided, this indicates the maximum revision to return.
 func (b *Backend) List(ctx context.Context, prefix, startKey string, limit, maxRevision int64) (int64, []*server.KeyValue, error) {
-	matches, err := b.kv.List(ctx, prefix, startKey, limit, maxRevision)
+	rev, matches, err := b.kv.List(ctx, prefix, startKey, limit, maxRevision)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -368,8 +368,7 @@ func (b *Backend) List(ctx context.Context, prefix, startKey string, limit, maxR
 		kvs = append(kvs, nd.KV)
 	}
 
-	storeRev := b.kv.BucketRevision()
-	return storeRev, kvs, nil
+	return rev, kvs, nil
 }
 
 func (b *Backend) Watch(ctx context.Context, prefix string, startRevision int64) server.WatchResult {
@@ -390,6 +389,7 @@ func (b *Backend) Watch(ctx context.Context, prefix string, startRevision int64)
 			if err == nil {
 				break
 			}
+			// Can get stuck in context canceled loop
 			b.l.Warnf("watch init: prefix=%s, err=%s", prefix, err)
 			time.Sleep(time.Second)
 		}

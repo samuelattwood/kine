@@ -8,10 +8,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k3s-io/kine/pkg/server"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sirupsen/logrus"
 	"github.com/tidwall/btree"
 )
+
+var compactionRetention = int64(10)
 
 type entry struct {
 	kc    *keyCodec
@@ -399,6 +402,8 @@ func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision 
 		it.Next()
 	}
 
+	logrus.Warnf("Count Prefix: %s | StartKey: %s | SeekKey: %s, Revision: %d", prefix, startKey, seekKey, revision)
+
 	var count int64
 	now := time.Now()
 
@@ -442,8 +447,9 @@ func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision 
 	return count, nil
 }
 
-func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, revision int64) ([]jetstream.KeyValueEntry, error) {
+func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, revision int64) (int64, []jetstream.KeyValueEntry, error) {
 	seekKey := prefix
+	logrus.Warnf("List Input Prefix: %s | StartKey: %s | SeekKey: %s | Revision: %d | Limit: %d", prefix, startKey, seekKey, revision, limit)
 
 	if startKey != "" {
 		startKey = strings.TrimPrefix(startKey, prefix)
@@ -453,10 +459,13 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 		seekKey = fmt.Sprintf("%s/%s", seekKey, startKey)
 	}
 
+	currentRev := e.BucketRevision()
+
 	it := e.bt.Iter()
 	if seekKey != "" {
 		if ok := it.Seek(seekKey); !ok {
-			return nil, nil
+			logrus.Warnf("List Seek Empty: %s | StartKey: %s | SeekKey: %s", prefix, startKey, seekKey)
+			return currentRev, nil, nil
 		}
 	}
 
@@ -464,10 +473,23 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 		it.Next()
 	}
 
+	// Mock Compaction
+	if revision > 0 && uint64(revision) < uint64(currentRev-compactionRetention) {
+		logrus.Warnf("Mock Compaction Key: %s Requested Revision: %d | Revision: %d", it.Key(), revision, currentRev)
+		entry, err := e.Get(ctx, it.Key())
+		if err != nil {
+			logrus.Error(err)
+		}
+		return currentRev, []jetstream.KeyValueEntry{entry}, server.ErrCompacted
+	}
+
+	logrus.Warnf("List Key: %s | Prefix: %s | StartKey: %s | SeekKey: %s", it.Key(), prefix, startKey, seekKey)
+
 	var matches []*keySeq
 	now := time.Now()
 
 	e.btm.RLock()
+
 	for {
 		if limit > 0 && len(matches) == int(limit) {
 			break
@@ -521,7 +543,7 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 		entries = append(entries, valueEntry)
 	}
 
-	return entries, nil
+	return currentRev, entries, nil
 }
 
 func NewKeyValue(ctx context.Context, bucket jetstream.KeyValue, js jetstream.JetStream) *KeyValue {
