@@ -14,7 +14,7 @@ import (
 	"github.com/tidwall/btree"
 )
 
-var compactionRetention = int64(10)
+var compactInterval = time.Minute * 5
 
 type entry struct {
 	kc    *keyCodec
@@ -60,9 +60,9 @@ type streamWatcher struct {
 	keyCodec   *keyCodec
 	valueCodec *valueCodec
 	updates    chan jetstream.KeyValueEntry
-	keyPrefix  string
-	ctx        context.Context
-	cancel     context.CancelFunc
+	// keyPrefix  string
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func (w *streamWatcher) Context() context.Context {
@@ -110,16 +110,26 @@ func (e *kvEntry) Delta() uint64                   { return e.delta }
 func (e *kvEntry) Operation() jetstream.KeyValueOp { return e.operation }
 
 type KeyValue struct {
-	nkv     jetstream.KeyValue
-	js      jetstream.JetStream
-	kc      *keyCodec
-	vc      *valueCodec
-	bt      *btree.Map[string, []*seqOp]
-	btm     sync.RWMutex
-	lastSeq uint64
+	nkv        jetstream.KeyValue
+	js         jetstream.JetStream
+	kc         *keyCodec
+	vc         *valueCodec
+	bt         *btree.Map[string, []*seqOp]
+	btm        sync.RWMutex
+	compacted  time.Time
+	compactRev int64
+	cm         sync.Mutex
+	lastSeq    uint64
 }
 
 func (e *KeyValue) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+	e.cm.Lock()
+	if time.Now().After(e.compacted.Add(compactInterval)) {
+		e.compacted = time.Now()
+		e.compactRev = e.BucketRevision()
+	}
+	e.cm.Unlock()
+
 	ek, err := e.kc.Encode(key)
 	if err != nil {
 		return nil, err
@@ -383,12 +393,12 @@ type keySeq struct {
 func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision int64) (int64, error) {
 	seekKey := prefix
 
-	if startKey != "" {
-		startKey = strings.TrimPrefix(startKey, prefix)
-		startKey = strings.TrimPrefix(startKey, "/")
+	logrus.Warnf("Count Prefix: %s | StartKey: %s | SeekKey: %s, Revision: %d", prefix, startKey, seekKey, revision)
 
-		seekKey = strings.TrimSuffix(seekKey, "/")
-		seekKey = fmt.Sprintf("%s/%s", seekKey, startKey)
+	useStartKey := startKey != "" && startKey > prefix && strings.HasPrefix(startKey, prefix)
+
+	if useStartKey {
+		seekKey = startKey
 	}
 
 	it := e.bt.Iter()
@@ -396,13 +406,10 @@ func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision 
 		if ok := it.Seek(seekKey); !ok {
 			return 0, nil
 		}
+		if useStartKey {
+			it.Next()
+		}
 	}
-
-	if startKey != "" {
-		it.Next()
-	}
-
-	logrus.Warnf("Count Prefix: %s | StartKey: %s | SeekKey: %s, Revision: %d", prefix, startKey, seekKey, revision)
 
 	var count int64
 	now := time.Now()
@@ -444,20 +451,36 @@ func (e *KeyValue) Count(ctx context.Context, prefix, startKey string, revision 
 	}
 	e.btm.RUnlock()
 
+	logrus.Warnf("Count Prefix: %s | StartKey: %s | SeekKey: %s | Count: %d", prefix, startKey, seekKey, count)
+
 	return count, nil
 }
 
 func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, revision int64) (int64, []jetstream.KeyValueEntry, error) {
 	seekKey := prefix
+
 	logrus.Warnf("List Input Prefix: %s | StartKey: %s | SeekKey: %s | Revision: %d | Limit: %d", prefix, startKey, seekKey, revision, limit)
 
-	if startKey != "" {
-		startKey = strings.TrimPrefix(startKey, prefix)
-		startKey = strings.TrimPrefix(startKey, "/")
+	useStartKey := startKey != "" && startKey > prefix && strings.HasPrefix(startKey, prefix)
 
-		seekKey = strings.TrimSuffix(seekKey, "/")
-		seekKey = fmt.Sprintf("%s/%s", seekKey, startKey)
+	if useStartKey {
+		seekKey = startKey
 	}
+
+	/**
+	if startKey != "" {
+		seekKey = strings.TrimSuffix(seekKey, "/")
+		startKey = strings.TrimSuffix(startKey, "/")
+
+		startKey = strings.TrimPrefix(startKey, seekKey)
+		startKey = strings.TrimPrefix(startKey, "/")
+		if startKey != "" {
+			seekKey = fmt.Sprintf("%s/%s", seekKey, startKey)
+		}
+	}
+	**/
+
+	logrus.Warnf("List Processed Prefix: %s | StartKey: %s | SeekKey: %s | Revision: %d | Limit: %d", prefix, startKey, seekKey, revision, limit)
 
 	currentRev := e.BucketRevision()
 
@@ -467,21 +490,30 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 			logrus.Warnf("List Seek Empty: %s | StartKey: %s | SeekKey: %s", prefix, startKey, seekKey)
 			return currentRev, nil, nil
 		}
-	}
-
-	if startKey != "" {
-		it.Next()
+		if useStartKey {
+			it.Next()
+		}
 	}
 
 	// Mock Compaction
-	if revision > 0 && uint64(revision) < uint64(currentRev-compactionRetention) {
+	e.cm.Lock()
+	if revision > 0 && revision < e.compactRev {
+		e.cm.Unlock()
 		logrus.Warnf("Mock Compaction Key: %s Requested Revision: %d | Revision: %d", it.Key(), revision, currentRev)
+
+		// Ensure Continue value for subsequent call is set correctly
+		if useStartKey {
+			it.Prev()
+		}
+
 		entry, err := e.Get(ctx, it.Key())
 		if err != nil {
 			logrus.Error(err)
 		}
+
 		return currentRev, []jetstream.KeyValueEntry{entry}, server.ErrCompacted
 	}
+	e.cm.Unlock()
 
 	logrus.Warnf("List Key: %s | Prefix: %s | StartKey: %s | SeekKey: %s", it.Key(), prefix, startKey, seekKey)
 
@@ -542,6 +574,8 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 		}
 		entries = append(entries, valueEntry)
 	}
+
+	logrus.Warnf("List Prefix: %s | Start Key: %s | Seek Key: %s | Return Len: %d", prefix, startKey, seekKey, len(entries))
 
 	return currentRev, entries, nil
 }
