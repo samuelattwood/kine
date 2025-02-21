@@ -483,7 +483,7 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 	logrus.Warnf("List Processed Prefix: %s | StartKey: %s | SeekKey: %s | Revision: %d | Limit: %d | Latest: %d", prefix, startKey, seekKey, revision, limit, lastCreate)
 
 	if revision <= 0 && currentRev < lastCreate {
-		timer := time.NewTimer(time.Millisecond * 200)
+		timer := time.NewTimer(time.Second)
 		loop := 0
 		for e.BucketRevision() < lastCreate {
 			logrus.Warnf("btree behind KV")
