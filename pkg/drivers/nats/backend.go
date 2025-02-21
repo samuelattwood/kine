@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/k3s-io/kine/pkg/server"
@@ -206,6 +207,8 @@ func (b *Backend) Create(ctx context.Context, key string, value []byte, lease in
 			return 0, err
 		}
 
+		logrus.Warnf("Create %s | Update Rev: %d", key, rev)
+
 		return int64(seq), nil
 	}
 
@@ -219,10 +222,15 @@ func (b *Backend) Create(ctx context.Context, key string, value []byte, lease in
 		return 0, err
 	}
 
+	logrus.Warnf("Create %s | Create Seq: %d", key, seq)
+
+	b.kv.lastCreate.Store(seq)
+
 	return int64(seq), nil
 }
 
 func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64, *server.KeyValue, bool, error) {
+	logrus.Warnf("Delete Key: %s | Revision: %d", key, revision)
 	// Get the key, allow deletes.
 	rev, value, err := b.get(ctx, key, 0, true)
 	if err != nil {
@@ -268,6 +276,7 @@ func (b *Backend) Delete(ctx context.Context, key string, revision int64) (int64
 		}
 		return rev, value.KV, false, nil
 	}
+	logrus.Warnf("Set Tombstone")
 
 	err = b.kv.Delete(ctx, key, jetstream.LastRevision(drev))
 	if err != nil {
@@ -341,6 +350,8 @@ func (b *Backend) Update(ctx context.Context, key string, value []byte, revision
 		return 0, nil, false, err
 	}
 
+	logrus.Warnf("Update | Rev Arg: %d | Update Rev: %d", revision, rev)
+
 	nd.KV.ModRevision = int64(seq)
 
 	return int64(seq), nd.KV, true, nil
@@ -358,7 +369,7 @@ func (b *Backend) List(ctx context.Context, prefix, startKey string, limit, maxR
 		return 0, nil, err
 	}
 
-	kvs := make([]*server.KeyValue, 0, len(matches))
+	var kvs []*server.KeyValue
 	for _, e := range matches {
 		var nd natsData
 		err = nd.Decode(e)
@@ -390,6 +401,10 @@ func (b *Backend) Watch(ctx context.Context, prefix string, startRevision int64)
 				break
 			}
 			// Can get stuck in context canceled loop
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+
 			b.l.Warnf("watch init: prefix=%s, err=%s", prefix, err)
 			time.Sleep(time.Second)
 		}

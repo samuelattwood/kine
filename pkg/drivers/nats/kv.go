@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/k3s-io/kine/pkg/server"
@@ -14,7 +15,10 @@ import (
 	"github.com/tidwall/btree"
 )
 
-var compactInterval = time.Minute * 5
+var (
+	compactInterval        = time.Minute * 5
+	compactRetention int64 = 100
+)
 
 type entry struct {
 	kc    *keyCodec
@@ -120,13 +124,18 @@ type KeyValue struct {
 	compactRev int64
 	cm         sync.Mutex
 	lastSeq    uint64
+	lastCreate atomic.Uint64
 }
 
 func (e *KeyValue) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
 	e.cm.Lock()
 	if time.Now().After(e.compacted.Add(compactInterval)) {
+		compactRev := e.BucketRevision() - compactRetention
+		if compactRev < 0 {
+			compactRev = 0
+		}
 		e.compacted = time.Now()
-		e.compactRev = e.BucketRevision()
+		e.compactRev = compactRev
 	}
 	e.cm.Unlock()
 
@@ -365,6 +374,7 @@ func (e *KeyValue) btreeWatcher(ctx context.Context) error {
 			}
 
 			e.btm.Lock()
+
 			e.lastSeq = seq
 			val, ok := e.bt.Get(key)
 			if !ok {
@@ -467,22 +477,26 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 		seekKey = startKey
 	}
 
-	/**
-	if startKey != "" {
-		seekKey = strings.TrimSuffix(seekKey, "/")
-		startKey = strings.TrimSuffix(startKey, "/")
-
-		startKey = strings.TrimPrefix(startKey, seekKey)
-		startKey = strings.TrimPrefix(startKey, "/")
-		if startKey != "" {
-			seekKey = fmt.Sprintf("%s/%s", seekKey, startKey)
-		}
-	}
-	**/
-
-	logrus.Warnf("List Processed Prefix: %s | StartKey: %s | SeekKey: %s | Revision: %d | Limit: %d", prefix, startKey, seekKey, revision, limit)
-
 	currentRev := e.BucketRevision()
+	lastCreate := int64(e.lastCreate.Load())
+
+	logrus.Warnf("List Processed Prefix: %s | StartKey: %s | SeekKey: %s | Revision: %d | Limit: %d | Latest: %d", prefix, startKey, seekKey, revision, limit, lastCreate)
+
+	if revision <= 0 && currentRev < lastCreate {
+		timer := time.NewTimer(time.Millisecond * 200)
+		loop := 0
+		for e.BucketRevision() < lastCreate {
+			logrus.Warnf("btree behind KV")
+			select {
+			case <-timer.C:
+				return lastCreate, nil, nil
+			default:
+				loop++
+				time.Sleep(time.Millisecond)
+			}
+		}
+		logrus.Warnf("btree caught up | Iteration: %d", loop)
+	}
 
 	it := e.bt.Iter()
 	if seekKey != "" {
@@ -508,7 +522,17 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 
 		entry, err := e.Get(ctx, it.Key())
 		if err != nil {
-			logrus.Error(err)
+			return currentRev, nil, err
+		}
+
+		var v natsData
+		err = v.Decode(entry)
+		if err != nil {
+			return currentRev, []jetstream.KeyValueEntry{entry}, server.ErrCompacted
+		}
+
+		if v.Delete {
+			return currentRev, nil, jetstream.ErrKeyNotFound
 		}
 
 		return currentRev, []jetstream.KeyValueEntry{entry}, server.ErrCompacted
@@ -567,12 +591,28 @@ func (e *KeyValue) List(ctx context.Context, prefix, startKey string, limit, rev
 
 	var entries []jetstream.KeyValueEntry
 	for _, m := range matches {
-		valueEntry, err := e.GetRevision(ctx, m.key, m.seq)
+		var valueEntry jetstream.KeyValueEntry
+		var err error
+		if revision <= 0 {
+			valueEntry, err = e.Get(ctx, m.key)
+		} else {
+			valueEntry, err = e.GetRevision(ctx, m.key, m.seq)
+		}
 		if err != nil {
 			logrus.Errorf("get revision in list error: %s @ %d: %v", m.key, m.seq, err)
 			continue
 		}
-		entries = append(entries, valueEntry)
+
+		var v natsData
+		err = v.Decode(valueEntry)
+		if err != nil {
+			logrus.Errorf("get revision in list error: %s @ %d: %v", m.key, m.seq, err)
+			continue
+		}
+
+		if !v.Delete {
+			entries = append(entries, valueEntry)
+		}
 	}
 
 	logrus.Warnf("List Prefix: %s | Start Key: %s | Seek Key: %s | Return Len: %d", prefix, startKey, seekKey, len(entries))
